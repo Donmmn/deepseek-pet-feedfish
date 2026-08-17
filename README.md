@@ -8,7 +8,7 @@
 
 计数包含普通输入、输出、缓存读取和缓存写入，不按价格或缓存折扣换算。
 
-![当前素材预览](assets/qa/sprites-preview.png)
+![DeepSeek Token Pet 桌面演示](assets/qa/desktop-preview.png)
 
 > 本项目是非官方社区项目，不属于 DeepSeek。公开分发前请自行确认角色形象与商标的使用权限。
 
