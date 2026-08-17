@@ -1,0 +1,95 @@
+{
+  "name": "deepseek-token-pet",
+  "version": "0.2.3",
+  "description": "Portable token-driven pixel desktop pet with a DeepSeek Harness adapter",
+  "author": "DeepSeek Token Pet contributors",
+  "type": "module",
+  "license": "MIT",
+  "main": "./dist/desktop/main.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./core": {
+      "types": "./dist/core/index.d.ts",
+      "default": "./dist/core/index.js"
+    },
+    "./widget": {
+      "types": "./dist/widget/index.d.ts",
+      "default": "./dist/widget/index.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "default": "./dist/server/index.js"
+    },
+    "./tui": {
+      "types": "./dist/tui/index.d.ts",
+      "default": "./dist/tui/index.js"
+    },
+    "./dsh": {
+      "types": "./dist/dsh/index.d.ts",
+      "default": "./dist/dsh/index.js"
+    },
+    "./assets/*": "./assets/*"
+  },
+  "bin": {
+    "deepseek-pet": "./dist/cli.js"
+  },
+  "files": [
+    "assets/character-body.png",
+    "assets/character-face-idle.png",
+    "assets/character-face-feed.png",
+    "assets/foods/",
+    "dist/",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "pnpm build && node dist/cli.js serve --open",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "pack:check": "pnpm build && pnpm pack --pack-destination release",
+    "desktop": "pnpm build && electron dist/desktop/main.js",
+    "desktop:pack": "pnpm build && electron-builder --dir",
+    "prepare": "pnpm build"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.0",
+    "@deepseek-ai/dsh-session": ">=0.1.0-rc.5"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": { "optional": true },
+    "@deepseek-ai/dsh-session": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "electron": "^37.2.6",
+    "electron-builder": "^26.0.12",
+    "jsdom": "^26.1.0",
+    "tsup": "^8.5.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "build": {
+    "appId": "dev.deepseek.tokenpet",
+    "productName": "DeepSeek Token Pet",
+    "directories": { "output": "release/desktop" },
+    "files": ["dist/**/*", "assets/character-body.png", "assets/character-face-idle.png", "assets/character-face-feed.png", "assets/foods/**/*", "package.json"],
+    "win": { "target": "portable", "icon": "assets/icon.ico" },
+    "mac": { "target": "dmg" },
+    "linux": { "target": "AppImage" }
+  }
+}

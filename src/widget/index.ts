@@ -1,0 +1,529 @@
+import { TokenPetLedger, petEvent, type PetEventV1, type PetSnapshotV1 } from '../core/index.js'
+import type { FoodAssetV1, FoodCatalogV1 } from '../server/food-catalog.js'
+
+const HTMLElementBase = (globalThis.HTMLElement ?? class {}) as typeof HTMLElement
+const ASSET_REVISION = '20260817-v5'
+
+const styles = String.raw`
+:host{--pet-scale:1;position:relative;display:block;width:440px;height:258px;contain:layout paint style;user-select:none;-webkit-user-select:none;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#eef6ff}
+*{box-sizing:border-box}.root{position:absolute;left:0;bottom:0;width:440px;height:258px;overflow:hidden;transform:scale(var(--pet-scale));transform-origin:left bottom;image-rendering:pixelated;filter:drop-shadow(0 3px 0 rgba(8,18,58,.32))}
+.stage{position:absolute;inset:0 0 30px 0}.character{position:absolute;right:120px;bottom:-28px;width:256px;height:256px;image-rendering:pixelated;z-index:2}
+.character-layer{position:absolute;inset:0;width:256px;height:256px;background-repeat:no-repeat;background-position:0 0;image-rendering:pixelated}.tail-canvas{position:absolute;left:0;top:0;width:360px;height:256px;z-index:0;image-rendering:pixelated}.character-body{z-index:1;background-size:100% 100%}.character-face{z-index:2;background-size:400% 100%}
+.character-layer[data-frame="0"]{background-position:0 0}.character-layer[data-frame="1"]{background-position:33.333% 0}.character-layer[data-frame="2"]{background-position:66.666% 0}.character-layer[data-frame="3"]{background-position:100% 0}
+.character.error{filter:saturate(.3) brightness(.85)}
+.queue{position:absolute;left:48px;right:160px;bottom:40px;height:64px;z-index:4;pointer-events:none}.bowl{position:absolute;width:64px;height:64px;background-repeat:no-repeat;background-size:100% 100%;background-position:0 0;image-rendering:pixelated;filter:drop-shadow(0 2px 0 rgba(8,18,58,.22))}.bowl.waiting{left:calc(var(--slot)*52px);opacity:calc(1 - var(--slot)*.1)}
+.bowl.eating{left:0;animation:eatPath var(--eat-ms,900ms) linear forwards}.overflow{position:absolute;left:8px;bottom:52px;padding:2px 5px;background:#16295f;border:2px solid #79b8ff;border-radius:2px;color:white;font-size:11px;z-index:4}
+.hud{position:absolute;right:164px;bottom:4px;width:174px;height:25px;display:flex;align-items:center;gap:8px;padding:3px 7px;background:rgba(11,25,65,.9);border:2px solid #6faeff;border-radius:3px;box-shadow:inset 0 0 0 2px #263f86;font-size:12px;line-height:1;z-index:5}.meter{height:9px;flex:0 0 104px;background:#071331;border:1px solid #94c8ff;padding:1px}.fill{height:100%;width:calc(var(--progress)*100%);background:linear-gradient(90deg,#4387e7,#b9e4ff);transition:width .25s steps(8,end)}.bowl-count{margin-left:auto;white-space:nowrap}
+.manual-feed{position:absolute;right:94px;bottom:4px;width:62px;height:25px;padding:0;border:2px solid #79b8ff;border-radius:3px;background:#16295f;color:#fff;box-shadow:inset 0 0 0 2px #263f86;font:12px/20px ui-monospace,SFMono-Regular,Consolas,monospace;cursor:pointer;z-index:6;image-rendering:pixelated;-webkit-app-region:no-drag}.manual-feed:hover{background:#24468f}.manual-feed:active{transform:translateY(1px)}
+.resize-handle{position:absolute;right:61px;bottom:4px;width:25px;height:25px;padding:0;border:2px solid #79b8ff;border-radius:3px;background:#16295f;color:#d9eeff;box-shadow:inset 0 0 0 2px #263f86;font:16px/20px monospace;cursor:nwse-resize;z-index:20;touch-action:none;-webkit-app-region:no-drag}.resize-handle:hover{background:#24468f}.resize-handle::before{content:'↘';display:block;transform:translateY(-1px)}
+@keyframes eatPath{0%{transform:translate(0,0);opacity:1}45%{transform:translate(34px,0);opacity:1}89%{transform:translate(68px,0);opacity:1}89.1%,100%{transform:translate(68px,0);opacity:0}}
+@media (prefers-reduced-motion:reduce){.bowl.eating{animation-duration:1ms}}
+`
+
+export class DeepseekTokenPetElement extends HTMLElementBase {
+  private readonly ledger = new TokenPetLedger()
+  private snapshotValue = this.ledger.snapshot()
+  private rootNode: ShadowRoot | undefined
+  private character: HTMLElement | undefined
+  private bodyLayer: HTMLElement | undefined
+  private faceLayer: HTMLElement | undefined
+  private tailCanvas: HTMLCanvasElement | undefined
+  private tailContext: CanvasRenderingContext2D | undefined
+  private idleFaceUrl = ''
+  private feedFaceUrl = ''
+  private queue: HTMLElement | undefined
+  private fill: HTMLElement | undefined
+  private bowlCountLabel: HTMLElement | undefined
+  private stream: EventSource | undefined
+  private animating = false
+  private manualFeeds = 0
+  private foods: FoodAssetV1[] = []
+  private lastObservedTotal = 0
+  private readonly usageBursts: Array<{ at: number, tokens: number }> = []
+  private tailDurationMs = 3200
+  private tailPhase = 0
+  private tailLastFrame = 0
+  private tailFrame: number | undefined
+  private rateTimer: ReturnType<typeof setInterval> | undefined
+  private blinkTimer: ReturnType<typeof setTimeout> | undefined
+  private blinkSteps: Array<ReturnType<typeof setTimeout>> = []
+  private idleRunning = false
+  private scaleValue = 1
+  private resizeHandle: HTMLButtonElement | undefined
+  private resizeStart: { x: number, y: number, scale: number } | undefined
+
+  static get observedAttributes(): string[] { return ['endpoint', 'asset-base', 'scale'] }
+
+  connectedCallback(): void {
+    if (this.rootNode === undefined) this.mount()
+    this.startIdleAnimations()
+    void this.connectEndpoint()
+  }
+
+  disconnectedCallback(): void {
+    this.stream?.close()
+    this.stopIdleAnimations()
+  }
+  attributeChangedCallback(name: string): void {
+    if (!this.isConnected) return
+    if (name === 'scale') { this.applyScale(); return }
+    this.applyAssets()
+    void this.connectEndpoint()
+  }
+
+  dispatchPetEvent(event: PetEventV1): PetSnapshotV1 {
+    const result = this.ledger.ingest(event)
+    this.setState(result.snapshot)
+    return result.snapshot
+  }
+
+  addTokens(tokens: number, source = 'embedded-client'): PetSnapshotV1 {
+    return this.dispatchPetEvent(petEvent({
+      type: 'usage', mode: 'delta', source,
+      usage: { inputTokens: tokens, outputTokens: 0 },
+    }))
+  }
+
+  feedOnce(): void {
+    this.manualFeeds += 1
+    void this.pumpBowls()
+  }
+
+  setScale(scale: number): void {
+    const next = Math.min(2, Math.max(.6, Number.isFinite(scale) ? scale : 1))
+    this.setAttribute('scale', next.toFixed(3))
+    if (!this.isConnected) this.applyScale(next)
+  }
+
+  setState(snapshot: PetSnapshotV1, trackUsage = true): void {
+    if (snapshot.revision < this.snapshotValue.revision) return
+    const tokenDelta = snapshot.totalTokens - this.lastObservedTotal
+    this.lastObservedTotal = snapshot.totalTokens
+    if (trackUsage && tokenDelta > 0) this.usageBursts.push({ at: Date.now(), tokens: tokenDelta })
+    this.updateTailSpeed()
+    this.snapshotValue = snapshot
+    this.renderState()
+    void this.pumpBowls()
+  }
+
+  get state(): PetSnapshotV1 { return this.snapshotValue }
+
+  private mount(): void {
+    this.rootNode = this.attachShadow({ mode: 'open' })
+    this.rootNode.innerHTML = `<style>${styles}</style><div class="root"><div class="stage"><div class="queue"></div><div class="character"><canvas class="tail-canvas" width="135" height="96" data-joints="6" data-resample="2.667" data-root-width="84" data-tip-width="32"></canvas><div class="character-layer character-body"></div><div class="character-layer character-face" data-frame="0" data-expression="idle"></div></div></div><div class="hud"><div class="meter" title="下一碗饭进度"><div class="fill"></div></div><span class="bowl-count"></span></div><button class="manual-feed" type="button" title="只播放动画，不增加 token">喂饭</button><button class="resize-handle" type="button" aria-label="拖动缩放" title="拖动缩放"></button></div>`
+    this.character = this.rootNode.querySelector<HTMLElement>('.character') ?? undefined
+    this.bodyLayer = this.rootNode.querySelector<HTMLElement>('.character-body') ?? undefined
+    this.faceLayer = this.rootNode.querySelector<HTMLElement>('.character-face') ?? undefined
+    this.tailCanvas = this.rootNode.querySelector<HTMLCanvasElement>('.tail-canvas') ?? undefined
+    if (this.tailCanvas !== undefined && globalThis.CanvasRenderingContext2D !== undefined) this.tailContext = this.tailCanvas.getContext('2d') ?? undefined
+    this.queue = this.rootNode.querySelector<HTMLElement>('.queue') ?? undefined
+    this.fill = this.rootNode.querySelector<HTMLElement>('.fill') ?? undefined
+    this.bowlCountLabel = this.rootNode.querySelector<HTMLElement>('.bowl-count') ?? undefined
+    this.resizeHandle = this.rootNode.querySelector<HTMLButtonElement>('.resize-handle') ?? undefined
+    this.rootNode.querySelector<HTMLButtonElement>('.manual-feed')?.addEventListener('click', () => this.feedOnce())
+    this.resizeHandle?.addEventListener('pointerdown', event => this.beginResize(event))
+    this.resizeHandle?.addEventListener('pointermove', event => this.resizeFromPointer(event))
+    this.resizeHandle?.addEventListener('pointerup', event => this.endResize(event))
+    this.resizeHandle?.addEventListener('pointercancel', event => this.endResize(event))
+    this.lastObservedTotal = this.snapshotValue.totalTokens
+    this.applyAssets()
+    this.updateTailSpeed()
+    this.drawTail()
+    this.renderState()
+    this.applyScale()
+  }
+
+  private applyScale(value = Number(this.getAttribute('scale') ?? 1)): void {
+    this.scaleValue = Math.min(2, Math.max(.6, Number.isFinite(value) ? value : 1))
+    this.style.setProperty('--pet-scale', String(this.scaleValue))
+    const width = Math.round(440 * this.scaleValue)
+    const height = Math.round(258 * this.scaleValue)
+    this.style.width = `${width}px`
+    this.style.height = `${height}px`
+    this.dispatchEvent(new CustomEvent('pet-resize', { detail: { scale: this.scaleValue, width, height }, bubbles: true, composed: true }))
+  }
+
+  private beginResize(event: PointerEvent): void {
+    this.resizeStart = { x: event.clientX, y: event.clientY, scale: this.scaleValue }
+    this.resizeHandle?.setPointerCapture?.(event.pointerId)
+    event.preventDefault()
+  }
+
+  private resizeFromPointer(event: PointerEvent): void {
+    if (this.resizeStart === undefined) return
+    const deltaX = event.clientX - this.resizeStart.x
+    const deltaY = event.clientY - this.resizeStart.y
+    const delta = (deltaX * 440 + deltaY * 258) / (440 * 440 + 258 * 258)
+    this.setScale(this.resizeStart.scale + delta)
+  }
+
+  private endResize(event: PointerEvent): void {
+    if (this.resizeStart === undefined) return
+    this.resizeStart = undefined
+    if (this.resizeHandle?.hasPointerCapture?.(event.pointerId)) this.resizeHandle.releasePointerCapture(event.pointerId)
+  }
+
+  private applyAssets(): void {
+    const base = (this.getAttribute('asset-base') ?? '/assets').replace(/\/$/, '')
+    this.idleFaceUrl = versionAsset(`${base}/character-face-idle.png`)
+    this.feedFaceUrl = versionAsset(`${base}/character-face-feed.png`)
+    if (this.bodyLayer !== undefined) this.bodyLayer.style.backgroundImage = `url(${JSON.stringify(versionAsset(`${base}/character-body.png`))})`
+    this.setFaceMode('idle', 0)
+    this.foods = [fallbackFood(base)]
+  }
+
+  private renderState(): void {
+    const state = this.snapshotValue
+    this.style.setProperty('--progress', String(state.nextBowlProgress))
+    if (this.fill !== undefined) this.fill.style.setProperty('--progress', String(state.nextBowlProgress))
+    if (this.bowlCountLabel !== undefined) this.bowlCountLabel.textContent = `${state.earnedBowls} 🍚`
+    if (this.character !== undefined) {
+      this.character.className = `character ${state.activity}${this.animating ? ' feeding' : ''}`
+    }
+    this.renderQueue()
+  }
+
+  private renderQueue(): void {
+    if (this.queue === undefined || this.animating) return
+    this.queue.replaceChildren()
+    const visible = Math.min(3, this.snapshotValue.pendingBowls)
+    for (let index = 0; index < visible; index += 1) {
+      const bowl = this.createFoodElement('bowl waiting')
+      bowl.style.setProperty('--slot', String(index))
+      this.queue.append(bowl)
+    }
+    if (this.snapshotValue.pendingBowls > visible) {
+      const overflow = document.createElement('span')
+      overflow.className = 'overflow'
+      overflow.textContent = `+${this.snapshotValue.pendingBowls - visible}`
+      this.queue.append(overflow)
+    }
+  }
+
+  private async pumpBowls(): Promise<void> {
+    if (this.animating || (this.snapshotValue.pendingBowls <= 0 && this.manualFeeds <= 0) || this.queue === undefined) return
+    this.animating = true
+    const countsTokens = this.snapshotValue.pendingBowls > 0
+    const bowlIndex = countsTokens ? this.snapshotValue.consumedBowls + 1 : undefined
+    if (!countsTokens) this.manualFeeds -= 1
+    const backlog = countsTokens ? this.snapshotValue.pendingBowls : 1
+    const duration = Math.max(180, 900 - Math.min(720, (backlog - 1) * 45))
+    this.queue.replaceChildren()
+    const bowl = this.createFoodElement('bowl eating')
+    bowl.style.setProperty('--eat-ms', `${duration}ms`)
+    this.queue.append(bowl)
+    this.renderState()
+    const firstBite = Math.max(40, Math.round(duration * .22))
+    const openWide = Math.max(50, Math.round(duration * .67))
+    this.setFaceMode('feed', 0)
+    await delay(firstBite)
+    this.setFaceMode('feed', 1)
+    await delay(openWide)
+    this.setFaceMode('feed', 2)
+    await delay(Math.max(30, duration - firstBite - openWide))
+    this.setFaceMode('feed', 3)
+    await delay(Math.max(90, duration * .22))
+    if (bowlIndex !== undefined) await this.acknowledgeBowl(bowlIndex)
+    this.animating = false
+    this.setFaceMode('idle', 0)
+    this.renderState()
+    if (this.snapshotValue.pendingBowls > 0 || this.manualFeeds > 0) queueMicrotask(() => { void this.pumpBowls() })
+  }
+
+  private createFoodElement(className: string): HTMLDivElement {
+    const food = this.pickFood()
+    const bowl = document.createElement('div')
+    bowl.className = className
+    bowl.dataset.foodId = food.id
+    bowl.dataset.foodWeight = String(food.weight)
+    bowl.style.backgroundImage = `url(${JSON.stringify(food.url)})`
+    return bowl
+  }
+
+  private pickFood(): FoodAssetV1 {
+    const totalWeight = this.foods.reduce((sum, food) => sum + food.weight, 0)
+    if (totalWeight <= 0) return this.foods[0] ?? fallbackFood((this.getAttribute('asset-base') ?? '/assets').replace(/\/$/, ''))
+    let cursor = Math.random() * totalWeight
+    for (const food of this.foods) {
+      cursor -= food.weight
+      if (cursor < 0) return food
+    }
+    return this.foods[this.foods.length - 1] ?? fallbackFood((this.getAttribute('asset-base') ?? '/assets').replace(/\/$/, ''))
+  }
+
+  private async acknowledgeBowl(index: number): Promise<void> {
+    const endpoint = this.endpoint()
+    if (endpoint === undefined) {
+      this.snapshotValue = { ...this.snapshotValue, revision: this.snapshotValue.revision + 1, consumedBowls: index, pendingBowls: Math.max(0, this.snapshotValue.earnedBowls - index) }
+      return
+    }
+    try {
+      const response = await fetch(`${endpoint}/v1/bowls/${index}/ack`, { method: 'POST' })
+      if (response.ok) this.snapshotValue = await response.json() as PetSnapshotV1
+    } catch { /* The next SSE snapshot retries the same unacknowledged bowl. */ }
+  }
+
+  private async loadFoods(endpoint: string | undefined): Promise<void> {
+    const base = (this.getAttribute('asset-base') ?? '/assets').replace(/\/$/, '')
+    if (endpoint === undefined) { this.foods = [fallbackFood(base)]; return }
+    try {
+      const response = await fetch(`${endpoint}/v1/foods`)
+      if (!response.ok) return
+      const catalog = await response.json() as FoodCatalogV1
+      if (catalog.schema !== 'deepseek-token-pet/foods@1' || catalog.foods.length === 0) return
+      this.foods = catalog.foods.map(food => {
+        const url = new URL(food.url, `${endpoint}/`)
+        url.searchParams.set('v', ASSET_REVISION)
+        return { ...food, url: url.href }
+      })
+    } catch { /* Keep the built-in plain-rice fallback. */ }
+  }
+
+  private startIdleAnimations(): void {
+    if (this.idleRunning) return
+    this.idleRunning = true
+    this.scheduleBlink()
+    this.rateTimer = setInterval(() => this.updateTailSpeed(), 250)
+    if (typeof requestAnimationFrame === 'function') this.tailFrame = requestAnimationFrame(time => this.animateTail(time))
+  }
+
+  private stopIdleAnimations(): void {
+    this.idleRunning = false
+    if (this.blinkTimer !== undefined) clearTimeout(this.blinkTimer)
+    for (const timer of this.blinkSteps) clearTimeout(timer)
+    this.blinkSteps = []
+    if (this.rateTimer !== undefined) clearInterval(this.rateTimer)
+    if (this.tailFrame !== undefined && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this.tailFrame)
+    this.tailFrame = undefined
+    this.tailLastFrame = 0
+  }
+
+  private scheduleBlink(): void {
+    if (!this.idleRunning) return
+    const wait = 1_800 + Math.random() * 3_200
+    this.blinkTimer = setTimeout(() => {
+      if (!this.animating) this.playBlink()
+      else this.scheduleBlink()
+    }, wait)
+  }
+
+  private playBlink(): void {
+    if (this.faceLayer === undefined) { this.scheduleBlink(); return }
+    const frames = [1, 2, 1, 0]
+    this.blinkSteps = frames.map((frame, index) => setTimeout(() => {
+      this.setFaceMode('idle', frame)
+      if (index === frames.length - 1) this.scheduleBlink()
+    }, index * 85))
+  }
+
+  private animateTail(time: number): void {
+    if (!this.idleRunning) return
+    if (this.tailLastFrame === 0) this.tailLastFrame = time
+    const elapsed = Math.min(100, Math.max(0, time - this.tailLastFrame))
+    this.tailLastFrame = time
+    this.tailPhase = (this.tailPhase + elapsed / this.tailDurationMs * Math.PI * 2) % (Math.PI * 2)
+    this.drawTail()
+    if (this.tailCanvas !== undefined) this.tailCanvas.dataset.durationMs = String(this.tailDurationMs)
+    this.tailFrame = requestAnimationFrame(next => this.animateTail(next))
+  }
+
+  private updateTailSpeed(): void {
+    const cutoff = Date.now() - 5_000
+    while (this.usageBursts[0]?.at !== undefined && this.usageBursts[0].at < cutoff) this.usageBursts.shift()
+    const tokens = this.usageBursts.reduce((sum, burst) => sum + burst.tokens, 0)
+    const normalized = Math.min(1, Math.log1p(tokens) / Math.log1p(2_000_000))
+    this.tailDurationMs = Math.round(3_200 - normalized * 2_500)
+    if (this.tailCanvas !== undefined) {
+      this.tailCanvas.dataset.tokens5s = String(tokens)
+      this.tailCanvas.dataset.durationMs = String(this.tailDurationMs)
+    }
+  }
+
+  private setFaceMode(mode: 'idle' | 'feed', frame: number): void {
+    if (this.faceLayer === undefined) return
+    this.faceLayer.style.backgroundImage = `url(${JSON.stringify(mode === 'idle' ? this.idleFaceUrl : this.feedFaceUrl)})`
+    this.faceLayer.dataset.expression = mode
+    this.faceLayer.dataset.frame = String(frame)
+  }
+
+  private drawTail(): void {
+    const context = this.tailContext
+    if (context === undefined) return
+    const centerline = buildTailCenterline(this.tailPhase)
+    const smooth = catmullRom(centerline, 5)
+    context.clearRect(0, 0, 135, 96)
+    context.imageSmoothingEnabled = false
+
+    traceFluke(context, smooth, 1.5)
+    context.fillStyle = '#202766'
+    context.fill()
+    traceRibbon(context, smooth, 15.75, 6)
+    context.fillStyle = '#202766'
+    context.fill()
+
+    traceFluke(context, smooth, 1.2)
+    context.fillStyle = '#4a6fc7'
+    context.fill()
+    traceRibbon(context, smooth, 13.125, 4.8)
+    context.fillStyle = '#4a6fc7'
+    context.fill()
+
+    context.save()
+    traceRibbon(context, smooth, 13.125, 4.8)
+    context.clip()
+    context.beginPath()
+    for (let index = 2; index < smooth.length - 3; index += 1) {
+      const point = smooth[index]
+      const before = smooth[index - 1]
+      const after = smooth[index + 1]
+      if (point === undefined || before === undefined || after === undefined) continue
+      const normal = unitNormal(before, after)
+      const ratio = index / (smooth.length - 1)
+      const offset = (13.125 + (4.8 - 13.125) * ratio) * -.42
+      const x = point.x + normal.x * offset
+      const y = point.y + normal.y * offset
+      if (index === 2) context.moveTo(x, y)
+      else context.lineTo(x, y)
+    }
+    context.strokeStyle = '#8ebcf1'
+    context.lineWidth = 1.5
+    context.lineCap = 'round'
+    context.lineJoin = 'round'
+    context.stroke()
+    context.restore()
+  }
+
+  private endpoint(): string | undefined {
+    const raw = this.getAttribute('endpoint')?.trim()
+    return raw === undefined || raw === '' ? undefined : raw.replace(/\/$/, '')
+  }
+
+  private async connectEndpoint(): Promise<void> {
+    this.stream?.close()
+    const endpoint = this.endpoint()
+    await this.loadFoods(endpoint)
+    if (endpoint === undefined) return
+    try {
+      const response = await fetch(`${endpoint}/v1/state`)
+      if (response.ok) this.setState(await response.json() as PetSnapshotV1, false)
+    } catch { return }
+    this.stream = new EventSource(`${endpoint}/v1/stream`)
+    this.stream.addEventListener('state', (event) => {
+      this.setState(JSON.parse((event as MessageEvent<string>).data) as PetSnapshotV1)
+    })
+  }
+}
+
+export function defineDeepseekTokenPet(tagName = 'deepseek-token-pet'): void {
+  if (globalThis.customElements !== undefined && customElements.get(tagName) === undefined) customElements.define(tagName, DeepseekTokenPetElement)
+}
+
+interface TailPoint { x: number, y: number }
+
+function buildTailCenterline(phase: number): TailPoint[] {
+  const lengths = [11.25, 11.25, 10.5, 9.75, 9, 8.25]
+  const rests = [-5, -24, -25, -25, -25, -24]
+  const points: TailPoint[] = [{ x: 81, y: 68 }]
+  let angle = rests[0]! + Math.sin(phase) * 2.2
+  for (let index = 0; index < lengths.length; index += 1) {
+    if (index > 0) angle += rests[index]! + Math.sin(phase - index * .48) * (2 + index * .65)
+    const previous = points[points.length - 1] as TailPoint
+    const radians = angle * Math.PI / 180
+    points.push({ x: previous.x + Math.cos(radians) * lengths[index]!, y: previous.y + Math.sin(radians) * lengths[index]! })
+  }
+  return points
+}
+
+function catmullRom(points: TailPoint[], subdivisions: number): TailPoint[] {
+  const output: TailPoint[] = []
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const p0 = points[Math.max(0, index - 1)] as TailPoint
+    const p1 = points[index] as TailPoint
+    const p2 = points[index + 1] as TailPoint
+    const p3 = points[Math.min(points.length - 1, index + 2)] as TailPoint
+    for (let step = 0; step < subdivisions; step += 1) {
+      const t = step / subdivisions
+      const t2 = t * t
+      const t3 = t2 * t
+      output.push({
+        x: .5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
+        y: .5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3),
+      })
+    }
+  }
+  output.push(points[points.length - 1] as TailPoint)
+  return output
+}
+
+function unitNormal(before: TailPoint, after: TailPoint): TailPoint {
+  const dx = after.x - before.x
+  const dy = after.y - before.y
+  const length = Math.hypot(dx, dy) || 1
+  return { x: -dy / length, y: dx / length }
+}
+
+function traceRibbon(context: CanvasRenderingContext2D, points: TailPoint[], startWidth: number, endWidth: number): void {
+  const left: TailPoint[] = []
+  const right: TailPoint[] = []
+  for (let index = 0; index < points.length; index += 1) {
+    const point = points[index] as TailPoint
+    const before = points[Math.max(0, index - 1)] as TailPoint
+    const after = points[Math.min(points.length - 1, index + 1)] as TailPoint
+    const normal = unitNormal(before, after)
+    const ratio = index / Math.max(1, points.length - 1)
+    const width = startWidth + (endWidth - startWidth) * ratio
+    left.push({ x: point.x + normal.x * width, y: point.y + normal.y * width })
+    right.push({ x: point.x - normal.x * width, y: point.y - normal.y * width })
+  }
+  context.beginPath()
+  context.moveTo(left[0]!.x, left[0]!.y)
+  for (const point of left.slice(1)) context.lineTo(point.x, point.y)
+  for (const point of right.reverse()) context.lineTo(point.x, point.y)
+  context.closePath()
+}
+
+function traceFluke(context: CanvasRenderingContext2D, points: TailPoint[], scale: number): void {
+  const tip = points[points.length - 1] as TailPoint
+  const before = points[points.length - 3] as TailPoint
+  const dx = tip.x - before.x
+  const dy = tip.y - before.y
+  const length = Math.hypot(dx, dy) || 1
+  const tangent = { x: dx / length, y: dy / length }
+  const normal = { x: -tangent.y, y: tangent.x }
+  const at = (forward: number, side: number): TailPoint => ({
+    x: tip.x + tangent.x * forward * scale + normal.x * side * scale,
+    y: tip.y + tangent.y * forward * scale + normal.y * side * scale,
+  })
+  const attachUpper = at(-1, 4)
+  const attachLower = at(-1, -4)
+  const upper = at(5, 12)
+  const notch = at(7, 1)
+  const lower = at(5, -12)
+  context.beginPath()
+  context.moveTo(attachUpper.x, attachUpper.y)
+  let point = at(2, 7)
+  let control = at(4, 11)
+  context.bezierCurveTo(point.x, point.y, control.x, control.y, upper.x, upper.y)
+  point = at(8, 10)
+  control = at(9, 4)
+  context.bezierCurveTo(point.x, point.y, control.x, control.y, notch.x, notch.y)
+  point = at(9, -4)
+  control = at(8, -10)
+  context.bezierCurveTo(point.x, point.y, control.x, control.y, lower.x, lower.y)
+  point = at(4, -11)
+  control = at(2, -7)
+  context.bezierCurveTo(point.x, point.y, control.x, control.y, attachLower.x, attachLower.y)
+  context.lineTo(attachUpper.x, attachUpper.y)
+  context.closePath()
+}
+
+function fallbackFood(base: string): FoodAssetV1 {
+  return { id: 'core/plain-rice{10}.png', name: 'plain-rice', url: versionAsset(`${base}/foods/core/plain-rice%7B10%7D.png`), weight: 10, width: 48, height: 48 }
+}
+
+function versionAsset(url: string): string {
+  return `${url}${url.includes('?') ? '&' : '?'}v=${ASSET_REVISION}`
+}
+
+const delay = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
+defineDeepseekTokenPet()

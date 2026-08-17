@@ -1,0 +1,6 @@
+- insert:
+    - id: deepseek-token-pet
+      name: deepseek-token-pet/dsh
+      config:
+        endpoint: http://127.0.0.1:47832/v1/events
+        source: deepseek-harness
