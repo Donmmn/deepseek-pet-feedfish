@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog } from 'electron'
+import { app, BrowserWindow, dialog, Menu, nativeImage, screen, Tray } from 'electron'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -6,6 +6,8 @@ import { createPetServer, type RunningPetServer } from '../server/index.js'
 
 let runtime: RunningPetServer | undefined
 let petWindow: BrowserWindow | undefined
+let tray: Tray | undefined
+let quitting = false
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock()
 if (!hasSingleInstanceLock) {
@@ -34,22 +36,62 @@ async function startDesktop(): Promise<void> {
     if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw error
   }
 
+  const initialWidth = 440
+  const initialHeight = 290
+  const workArea = screen.getPrimaryDisplay().workArea
   petWindow = new BrowserWindow({
-    width: 440,
-    height: 258,
+    x: workArea.x + workArea.width - initialWidth - 16,
+    y: workArea.y + workArea.height - initialHeight - 16,
+    width: initialWidth,
+    height: initialHeight,
     minWidth: 264,
-    minHeight: 155,
+    minHeight: 174,
     transparent: true,
     frame: false,
     alwaysOnTop: true,
+    skipTaskbar: true,
     resizable: true,
     hasShadow: false,
     show: false,
     webPreferences: { sandbox: true, contextIsolation: true },
   })
   petWindow.setAlwaysOnTop(true, 'floating')
+  petWindow.on('close', event => {
+    if (quitting) return
+    event.preventDefault()
+    petWindow?.hide()
+  })
   await petWindow.loadURL(`${petUrl}/?desktop=1`)
+  createTray(packageRoot)
   petWindow.show()
+}
+
+function createTray(packageRoot: string): void {
+  const iconPath = join(packageRoot, 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png')
+  let icon = nativeImage.createFromPath(iconPath)
+  if (icon.isEmpty()) icon = nativeImage.createFromPath(process.execPath)
+  tray = new Tray(icon)
+  tray.setToolTip('DeepSeek Token Pet')
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: '显示 / 隐藏桌宠', click: togglePetWindow },
+    { type: 'separator' },
+    { label: '退出', click: quitFromTray },
+  ]))
+  tray.on('click', togglePetWindow)
+}
+
+function togglePetWindow(): void {
+  if (petWindow === undefined) return
+  if (petWindow.isVisible()) petWindow.hide()
+  else {
+    petWindow.show()
+    petWindow.focus()
+  }
+}
+
+function quitFromTray(): void {
+  quitting = true
+  app.quit()
 }
 
 function showStartupError(error: unknown): void {
@@ -58,5 +100,10 @@ function showStartupError(error: unknown): void {
   app.quit()
 }
 
-app.on('before-quit', () => { void runtime?.close() })
-app.on('window-all-closed', () => app.quit())
+app.on('before-quit', () => {
+  quitting = true
+  tray?.destroy()
+  tray = undefined
+  void runtime?.close()
+})
+app.on('window-all-closed', () => { /* The tray owns the application lifetime. */ })

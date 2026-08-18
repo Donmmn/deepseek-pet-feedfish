@@ -1,6 +1,6 @@
 {
   "name": "deepseek-token-pet",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Portable token-driven pixel desktop pet with a DeepSeek Harness adapter",
   "author": "DeepSeek Token Pet contributors",
   "type": "module",
@@ -41,6 +41,8 @@
     "assets/character-body.png",
     "assets/character-face-idle.png",
     "assets/character-face-feed.png",
+    "assets/icon.png",
+    "assets/icon.ico",
     "assets/foods/",
     "dist/",
     "cordis.patch.yml",
@@ -87,7 +89,7 @@
     "appId": "dev.deepseek.tokenpet",
     "productName": "DeepSeek Token Pet",
     "directories": { "output": "release/desktop" },
-    "files": ["dist/**/*", "assets/character-body.png", "assets/character-face-idle.png", "assets/character-face-feed.png", "assets/foods/**/*", "package.json"],
+    "files": ["dist/**/*", "assets/character-body.png", "assets/character-face-idle.png", "assets/character-face-feed.png", "assets/icon.png", "assets/icon.ico", "assets/foods/**/*", "package.json"],
     "win": { "target": "portable", "icon": "assets/icon.ico" },
     "mac": { "target": "dmg" },
     "linux": { "target": "AppImage" }
