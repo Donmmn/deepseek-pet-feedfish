@@ -17,7 +17,7 @@
 如果拿到已经打包的 Windows 便携版，可以直接运行：
 
 ```text
-DeepSeek Token Pet 0.2.3.exe
+DeepSeek Token Pet 0.2.6.exe
 ```
 
 首次启动后，桌宠会同时在本机启动 `http://127.0.0.1:47832`。右下角按钮可以拖动缩放；“喂饭”按钮只预览一次动画，不增加 token 或食物数量。
@@ -171,7 +171,7 @@ python examples/python_client.py
 
 ```powershell
 node dist/cli.js serve
-dsh plugin --profile web add ./release/deepseek-token-pet-0.2.3.tgz
+dsh plugin --profile web add ./release/deepseek-token-pet-0.2.6.tgz
 dsh --profile web web
 ```
 
@@ -216,12 +216,13 @@ import { TokenPetLedger, petEvent } from 'deepseek-token-pet/core'
 | 方法 | 地址 | 用途 |
 |---|---|---|
 | `POST` | `/v1/events` | 写入 usage、activity 或 reset 事件 |
+| `POST` | `/v1/heartbeat` | DSH 插件心跳，用于显示连接状态 |
 | `GET` | `/v1/state` | 获取当前 token、食物和活动状态 |
 | `GET` | `/v1/stream` | 订阅 `state` 类型的 SSE 快照 |
 | `GET` | `/v1/foods` | 查看启动时扫描的食物清单 |
 | `POST` | `/v1/bowls/{index}/ack` | 确认第 index 份食物动画已完成 |
 
-`activity` 可用值：`idle`、`thinking`、`tool`、`waiting`、`error`、`done`。`reset` 是显式管理操作，普通适配器不应自动发送。
+`state` 中的 `dshConnected`、`dshSource`、`dshLastSeenAt` 表示 DSH 插件最近一次心跳是否在有效窗口内。`activity` 可用值：`idle`、`thinking`、`tool`、`waiting`、`error`、`done`。`reset` 是显式管理操作，普通适配器不应自动发送。
 
 ## 开发与打包
 
@@ -254,5 +255,21 @@ pnpm build
 pnpm pack --pack-destination release
 pnpm exec electron-builder --win portable
 ```
+
+生成 macOS 版（Apple Silicon/arm64）：
+
+```bash
+# 首次需要 512x512 以上图标；仓库内已生成 assets/icon-1024.png
+sips -z 1024 1024 assets/icon.png --out assets/icon-1024.png
+pnpm build
+pnpm exec electron-builder --mac dmg
+pnpm exec electron-builder --mac zip
+```
+
+产物位于 `release/desktop/DeepSeek Token Pet-0.2.6-arm64.dmg` 与
+`release/desktop/DeepSeek Token Pet-0.2.6-arm64-mac.zip`。
+未配置 Apple 开发者签名时会跳过签名，仅适合本机/内部测试分发。
+
+macOS 版默认不显示在程序坞，只显示在状态栏；状态栏使用米饭单色图标，菜单里会显示 `DSH 插件：已连接/未连接`。
 
 项目采用 MIT License。

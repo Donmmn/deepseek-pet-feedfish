@@ -22,8 +22,12 @@ export interface RunningPetServer {
   close: () => Promise<void>
 }
 
+const DSH_HEARTBEAT_TIMEOUT_MS = 30_000
+
 class PetStore extends EventEmitter {
   readonly ledger: TokenPetLedger
+  private heartbeatSource: string | undefined
+  private heartbeatAt: number | undefined
   constructor(private readonly stateFile?: string) {
     super()
     let seed: LedgerSeed = {}
@@ -32,8 +36,21 @@ class PetStore extends EventEmitter {
     }
     this.ledger = new TokenPetLedger(undefined, seed)
   }
-  publish(): PetSnapshotV1 {
+  markHeartbeat(source: string, at = Date.now()): void {
+    this.heartbeatSource = source
+    this.heartbeatAt = at
+  }
+  snapshot(): PetSnapshotV1 {
     const state = this.ledger.snapshot()
+    if (this.heartbeatAt === undefined) return state
+    const result: PetSnapshotV1 = { ...state }
+    result.dshConnected = Date.now() - this.heartbeatAt < DSH_HEARTBEAT_TIMEOUT_MS
+    result.dshLastSeenAt = this.heartbeatAt
+    if (this.heartbeatSource !== undefined) result.dshSource = this.heartbeatSource
+    return result
+  }
+  publish(): PetSnapshotV1 {
+    const state = this.snapshot()
     if (this.stateFile !== undefined) writeFileSync(this.stateFile, `${JSON.stringify(this.ledger.serialize(), null, 2)}\n`, 'utf8')
     this.emit('state', state)
     return state
@@ -59,14 +76,22 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
     if (request.method === 'OPTIONS') { response.writeHead(204).end(); return }
     const url = new URL(request.url ?? '/', `http://${request.headers.host ?? `${host}:${port}`}`)
     try {
-      if (request.method === 'GET' && url.pathname === '/v1/state') return json(response, 200, store.ledger.snapshot())
+      if (request.method === 'GET' && url.pathname === '/v1/state') return json(response, 200, store.snapshot())
       if (request.method === 'GET' && url.pathname === '/v1/foods') return json(response, 200, foodCatalog)
       if (request.method === 'GET' && url.pathname === '/v1/stream') {
         response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' })
         clients.add(response)
-        response.write(`event: state\ndata: ${JSON.stringify(store.ledger.snapshot())}\n\n`)
+        response.write(`event: state\ndata: ${JSON.stringify(store.snapshot())}\n\n`)
         request.on('close', () => clients.delete(response))
         return
+      }
+      if (request.method === 'POST' && url.pathname === '/v1/heartbeat') {
+        const body = await readJson(request) as { source?: unknown }
+        if (typeof body?.source !== 'string' || body.source.length === 0) {
+          return json(response, 400, { error: 'source_required' })
+        }
+        store.markHeartbeat(body.source)
+        return json(response, 200, { ok: true, state: store.publish() })
       }
       if (request.method === 'POST' && url.pathname === '/v1/events') {
         const body = await readJson(request)
@@ -101,7 +126,7 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
   const url = `http://${host}:${actualPort}`
   return {
     server, url,
-    state: () => store.ledger.snapshot(), foods: foodCatalog,
+    state: () => store.snapshot(), foods: foodCatalog,
     close: () => new Promise<void>((resolveClose, reject) => server.close(error => error === undefined ? resolveClose() : reject(error))),
   }
 }
@@ -132,4 +157,4 @@ function file(response: ServerResponse, path: string): void {
   response.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': cacheControl })
   createReadStream(path).pipe(response)
 }
-function demoHtml(): string { return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>DeepSeek Token Pet</title><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}body{display:grid;place-items:center;-webkit-app-region:drag}.close{position:fixed;right:8px;top:7px;width:24px;height:24px;border:2px solid #79b8ff;background:#16295f;color:#fff;font:16px/16px monospace;opacity:0;transition:opacity .15s;-webkit-app-region:no-drag}.desktop:hover .close{opacity:.8}.close:hover{opacity:1!important}</style></head><body><deepseek-token-pet endpoint="" asset-base="/assets"></deepseek-token-pet><script type="module">import '/widget.js?v=0.2.3';const pet=document.querySelector('deepseek-token-pet');pet.setAttribute('endpoint',location.origin);if(new URLSearchParams(location.search).has('desktop')){document.body.classList.add('desktop');pet.addEventListener('pet-resize',event=>window.resizeTo(event.detail.width,event.detail.height));const button=document.createElement('button');button.className='close';button.title='关闭桌宠';button.textContent='×';button.onclick=()=>window.close();document.body.append(button)}</script></body></html>` }
+function demoHtml(): string { return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>DeepSeek Token Pet</title><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}body{display:grid;place-items:center;-webkit-app-region:drag}.close{position:fixed;right:8px;top:7px;width:24px;height:24px;border:2px solid #79b8ff;background:#16295f;color:#fff;font:16px/16px monospace;opacity:0;transition:opacity .15s;-webkit-app-region:no-drag}.desktop:hover .close{opacity:.8}.close:hover{opacity:1!important}</style></head><body><deepseek-token-pet endpoint="" asset-base="/assets"></deepseek-token-pet><script type="module">import '/widget.js?v=0.2.4';const pet=document.querySelector('deepseek-token-pet');pet.setAttribute('endpoint',location.origin);if(new URLSearchParams(location.search).has('desktop')){document.body.classList.add('desktop');pet.addEventListener('pet-resize',event=>window.resizeTo(event.detail.width,event.detail.height));const button=document.createElement('button');button.className='close';button.title='关闭桌宠';button.textContent='×';button.onclick=()=>window.close();document.body.append(button)}</script></body></html>` }

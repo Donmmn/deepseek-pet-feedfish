@@ -54,6 +54,12 @@ export interface PetSnapshotV1 {
   nextBowlProgress: number
   activity: ActivityPetEvent['activity']
   activityLabel?: string
+  /** True when a DSH plugin has sent a heartbeat within the timeout window. */
+  dshConnected?: boolean
+  /** Identifier of the most recent DSH plugin that sent a heartbeat. */
+  dshSource?: string
+  /** Unix epoch ms of the most recent DSH heartbeat. */
+  dshLastSeenAt?: number
 }
 
 const finiteNonNegative = (value: unknown, field: string): number => {

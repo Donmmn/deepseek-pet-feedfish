@@ -1,4 +1,5 @@
-import { app, BrowserWindow, dialog } from 'electron'
+import { app, BrowserWindow, dialog, Menu, nativeImage, Tray } from 'electron'
+import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -6,6 +7,8 @@ import { createPetServer, type RunningPetServer } from '../server/index.js'
 
 let runtime: RunningPetServer | undefined
 let petWindow: BrowserWindow | undefined
+let tray: Tray | undefined
+let trayTimer: ReturnType<typeof setInterval> | undefined
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock()
 if (!hasSingleInstanceLock) {
@@ -34,6 +37,9 @@ async function startDesktop(): Promise<void> {
     if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw error
   }
 
+  // macOS menu bar app: hide from Dock and stay alive in the status bar.
+  app.dock?.hide()
+
   petWindow = new BrowserWindow({
     width: 440,
     height: 258,
@@ -49,7 +55,46 @@ async function startDesktop(): Promise<void> {
   })
   petWindow.setAlwaysOnTop(true, 'floating')
   await petWindow.loadURL(`${petUrl}/?desktop=1`)
+  setupTray(packageRoot)
+  trayTimer = setInterval(refreshTrayMenu, 5000)
   petWindow.show()
+}
+
+function toggleWindow(): void {
+  if (petWindow === undefined) return
+  if (petWindow.isVisible()) {
+    petWindow.hide()
+  } else {
+    petWindow.show()
+    petWindow.focus()
+  }
+}
+
+function trayStatusLabel(): string {
+  return runtime?.state().dshConnected === true ? 'DSH 插件：已连接' : 'DSH 插件：未连接'
+}
+
+function refreshTrayMenu(): void {
+  if (tray === undefined) return
+  tray.setToolTip(`DeepSeek Token Pet — ${trayStatusLabel()}`)
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: trayStatusLabel(), enabled: false },
+    { type: 'separator' },
+    { label: '显示/隐藏桌宠', click: toggleWindow },
+    { type: 'separator' },
+    { label: '退出 DeepSeek Token Pet', click: () => app.quit() },
+  ]))
+}
+
+function setupTray(packageRoot: string): void {
+  const icon = nativeImage.createEmpty()
+  icon.addRepresentation({ scaleFactor: 1, buffer: readFileSync(join(packageRoot, 'assets', 'tray-icon.png')) })
+  icon.addRepresentation({ scaleFactor: 2, buffer: readFileSync(join(packageRoot, 'assets', 'tray-icon@2x.png')) })
+  icon.setTemplateImage(true)
+
+  tray = new Tray(icon)
+  tray.on('click', toggleWindow)
+  refreshTrayMenu()
 }
 
 function showStartupError(error: unknown): void {
@@ -58,5 +103,10 @@ function showStartupError(error: unknown): void {
   app.quit()
 }
 
-app.on('before-quit', () => { void runtime?.close() })
-app.on('window-all-closed', () => app.quit())
+app.on('before-quit', () => {
+  if (trayTimer !== undefined) clearInterval(trayTimer)
+  void runtime?.close()
+})
+app.on('window-all-closed', () => {
+  // Keep the menu bar app alive when the pet window is closed manually.
+})
