@@ -44,6 +44,8 @@
     "assets/icon.png",
     "assets/icon.ico",
     "assets/foods/",
+    "assets/legs/",
+    "skin/",
     "dist/",
     "cordis.patch.yml",
     "README.md",
@@ -62,6 +64,7 @@
     "pack:check": "pnpm build && pnpm pack --pack-destination release",
     "desktop": "pnpm build && electron dist/desktop/main.js",
     "desktop:pack": "pnpm build && electron-builder --dir",
+    "pose:edit": "tsx pose-editor/pose-editor-server.ts",
     "prepare": "pnpm build"
   },
   "peerDependencies": {
@@ -89,7 +92,7 @@
     "appId": "dev.deepseek.tokenpet",
     "productName": "DeepSeek Token Pet",
     "directories": { "output": "release/desktop" },
-    "files": ["dist/**/*", "assets/character-body.png", "assets/character-face-idle.png", "assets/character-face-feed.png", "assets/icon.png", "assets/icon.ico", "assets/foods/**/*", "package.json"],
+    "files": ["dist/**/*", "assets/character-body.png", "assets/character-face-idle.png", "assets/character-face-feed.png", "assets/icon.png", "assets/icon.ico", "assets/foods/**/*", "assets/legs/**/*", "skin/**/*", "package.json"],
     "win": { "target": "portable", "icon": "assets/icon.ico" },
     "mac": { "target": "dmg" },
     "linux": { "target": "AppImage" }

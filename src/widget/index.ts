@@ -1,5 +1,6 @@
 import { TokenPetLedger, petEvent, type PetEventV1, type PetSnapshotV1 } from '../core/index.js'
 import type { FoodAssetV1, FoodCatalogV1 } from '../server/food-catalog.js'
+import type { InstalledSkinV1, SkinCatalogV1, SkinPackageV1 } from '../server/skin-catalog.js'
 import {
   DEFAULT_WIDGET_SETTINGS,
   PET_SETTINGS_STORAGE_KEY,
@@ -14,23 +15,23 @@ import {
 export * from './settings.js'
 
 const HTMLElementBase = (globalThis.HTMLElement ?? class {}) as typeof HTMLElement
-const ASSET_REVISION = '20260817-v5'
+const ASSET_REVISION = '20260819-v9'
 const PET_WIDTH = 440
-const PET_HEIGHT = 290
+const PET_HEIGHT = 370
 
 const styles = String.raw`
 :host{--pet-scale:1;--feed-offset-x:0px;--feed-offset-y:0px;--food-distance:68px;--food-half-distance:34px;--button-bg:#16295f;--button-border:#79b8ff;--button-text:#fff;--progress-fill:#4387e7;position:relative;display:block;width:${PET_WIDTH}px;height:${PET_HEIGHT}px;contain:layout paint style;user-select:none;-webkit-user-select:none;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#eef6ff}
 *{box-sizing:border-box}.root{position:absolute;left:0;bottom:0;width:${PET_WIDTH}px;height:${PET_HEIGHT}px;overflow:hidden;transform:scale(var(--pet-scale));transform-origin:left bottom;image-rendering:pixelated;filter:drop-shadow(0 3px 0 rgba(8,18,58,.32))}
 .stage{position:absolute;inset:0 0 30px 0}.character{position:absolute;right:120px;bottom:-28px;width:256px;height:256px;image-rendering:pixelated;z-index:2}
-.character-layer{position:absolute;inset:0;width:256px;height:256px;background-repeat:no-repeat;background-position:0 0;image-rendering:pixelated}.tail-canvas{position:absolute;left:0;top:0;width:360px;height:256px;z-index:0;image-rendering:pixelated}.character-body{z-index:1;background-size:100% 100%}.character-face{z-index:2;background-size:400% 100%}
+.character-layer{position:absolute;inset:0;width:256px;height:256px;background-repeat:no-repeat;background-position:0 0;image-rendering:pixelated}.appendage-canvas{position:absolute;left:0;top:0;width:360px;height:256px;z-index:0;image-rendering:pixelated}.appendage-canvas[hidden]{display:none}.character-body{z-index:1;background-size:100% 100%}.character-face{z-index:2;background-size:400% 100%}
 .character-layer[data-frame="0"]{background-position:0 0}.character-layer[data-frame="1"]{background-position:33.333% 0}.character-layer[data-frame="2"]{background-position:66.666% 0}.character-layer[data-frame="3"]{background-position:100% 0}
 .character.error{filter:saturate(.3) brightness(.85)}
 .queue{position:absolute;left:calc(116px + var(--feed-offset-x) - var(--food-distance));bottom:calc(40px - var(--feed-offset-y));width:260px;height:64px;z-index:4;pointer-events:none}.bowl{position:absolute;width:64px;height:64px;background-repeat:no-repeat;background-size:100% 100%;background-position:0 0;image-rendering:pixelated;filter:drop-shadow(0 2px 0 rgba(8,18,58,.22))}.bowl.waiting{left:calc(var(--slot)*52px);opacity:calc(1 - var(--slot)*.1)}
 .bowl.eating{left:0;animation:eatPath var(--eat-ms,900ms) linear forwards}.overflow{position:absolute;left:8px;bottom:52px;padding:2px 5px;background:#16295f;border:2px solid #79b8ff;border-radius:2px;color:white;font-size:11px;z-index:4}
 .hud{position:absolute;right:164px;bottom:4px;width:174px;height:25px;display:flex;align-items:center;gap:8px;padding:3px 7px;background:rgba(11,25,65,.9);border:2px solid #6faeff;border-radius:3px;box-shadow:inset 0 0 0 2px #263f86;font-size:12px;line-height:1;z-index:5}.meter{height:9px;flex:0 0 104px;background:#071331;border:1px solid #94c8ff;padding:1px}.fill{height:100%;width:calc(var(--progress)*100%);background:var(--progress-fill);transition:width .25s steps(8,end)}.bowl-count{margin-left:auto;white-space:nowrap}
-.settings-toggle,.manual-feed,.resize-handle,.settings-close,.reset-settings{padding:0;border:2px solid var(--button-border);border-radius:3px;background:var(--button-bg);color:var(--button-text);box-shadow:inset 0 0 0 2px color-mix(in srgb,var(--button-border) 35%,transparent);cursor:pointer;image-rendering:pixelated;-webkit-app-region:no-drag}.settings-toggle:hover,.manual-feed:hover,.resize-handle:hover,.settings-close:hover,.reset-settings:hover{filter:brightness(1.25)}.settings-toggle:active,.manual-feed:active,.resize-handle:active,.reset-settings:active{transform:translateY(1px)}
+.settings-toggle,.manual-feed,.resize-handle,.settings-close,.reset-settings,.skin-action{padding:0;border:2px solid var(--button-border);border-radius:3px;background:var(--button-bg);color:var(--button-text);box-shadow:inset 0 0 0 2px color-mix(in srgb,var(--button-border) 35%,transparent);cursor:pointer;image-rendering:pixelated;-webkit-app-region:no-drag}.settings-toggle:hover,.manual-feed:hover,.resize-handle:hover,.settings-close:hover,.reset-settings:hover,.skin-action:hover{filter:brightness(1.25)}.settings-toggle:active,.manual-feed:active,.resize-handle:active,.reset-settings:active,.skin-action:active{transform:translateY(1px)}
 .settings-toggle{position:absolute;right:346px;bottom:4px;width:25px;height:25px;font:15px/20px sans-serif;z-index:20}.manual-feed{position:absolute;right:94px;bottom:4px;width:62px;height:25px;font:12px/20px ui-monospace,SFMono-Regular,Consolas,monospace;z-index:6}.resize-handle{position:absolute;right:61px;bottom:4px;width:25px;height:25px;font:16px/20px monospace;cursor:nwse-resize;z-index:20;touch-action:none}.resize-handle::before{content:'↘';display:block;transform:translateY(-1px)}
-.settings-panel{position:absolute;right:8px;bottom:36px;width:264px;padding:7px 8px 8px;border:2px solid var(--button-border);border-radius:4px;background:rgba(8,18,48,.97);color:var(--button-text);box-shadow:inset 0 0 0 2px color-mix(in srgb,var(--button-border) 28%,transparent),0 3px 0 rgba(3,8,25,.45);font:10px/1.25 ui-monospace,SFMono-Regular,Consolas,monospace;z-index:40;image-rendering:auto;-webkit-app-region:no-drag}.settings-panel[hidden],.feed-target-marker[hidden],.feed-flight-guide[hidden]{display:none}.settings-header{height:22px;display:flex;align-items:center;justify-content:space-between;padding-left:2px;font-size:12px}.settings-close{width:21px;height:21px;font:14px/16px monospace}.settings-panel fieldset{margin:3px 0 5px;padding:4px 6px 5px;border:1px solid var(--button-border)}.settings-panel legend{padding:0 4px;color:var(--button-text)}.setting-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px}.setting-grid.theme{grid-template-columns:repeat(2,1fr)}.setting-row{display:flex;align-items:center;justify-content:space-between;gap:5px;margin:4px 0}.setting-grid label{display:flex;flex-direction:column;align-items:stretch;gap:2px;white-space:nowrap}.setting-grid.theme label{display:grid;grid-template-columns:1fr 30px;align-items:center;gap:3px}.settings-panel input[type=number]{min-width:0;width:100%;height:19px;padding:1px 2px;border:1px solid var(--button-border);background:#071331;color:var(--button-text);font:10px monospace}.setting-row input[type=number]{width:48px}.settings-panel input[type=color]{width:30px;height:20px;padding:1px;border:1px solid var(--button-border);background:#071331}.settings-hint{margin:3px 0 0;color:#b9d9ff}.settings-actions{display:flex;justify-content:flex-end}.reset-settings{height:23px;padding:0 8px;font:10px/18px ui-monospace,SFMono-Regular,Consolas,monospace}
+.settings-panel{position:absolute;right:8px;bottom:36px;width:286px;max-height:326px;overflow:auto;padding:7px 8px 8px;border:2px solid var(--button-border);border-radius:4px;background:rgba(8,18,48,.97);color:var(--button-text);box-shadow:inset 0 0 0 2px color-mix(in srgb,var(--button-border) 28%,transparent),0 3px 0 rgba(3,8,25,.45);font:10px/1.25 ui-monospace,SFMono-Regular,Consolas,monospace;z-index:40;image-rendering:auto;-webkit-app-region:no-drag;scrollbar-width:thin;scrollbar-color:var(--progress-fill) var(--button-bg)}.settings-panel::-webkit-scrollbar{width:9px}.settings-panel::-webkit-scrollbar-track{background:var(--button-bg);border-left:1px solid var(--button-border)}.settings-panel::-webkit-scrollbar-thumb{min-height:24px;border:2px solid var(--button-bg);border-radius:3px;background:var(--progress-fill);box-shadow:inset 0 0 0 1px var(--button-border)}.settings-panel::-webkit-scrollbar-thumb:hover{background:color-mix(in srgb,var(--progress-fill) 78%,white)}.settings-panel::-webkit-scrollbar-corner{background:var(--button-bg)}.settings-panel[hidden],.feed-target-marker[hidden],.feed-flight-guide[hidden],.leg-setting[hidden]{display:none}.settings-header{height:22px;display:flex;align-items:center;justify-content:space-between;padding-left:2px;font-size:12px}.settings-close{width:21px;height:21px;font:14px/16px monospace}.settings-panel fieldset{margin:3px 0 5px;padding:4px 6px 5px;border:1px solid var(--button-border)}.settings-panel legend{padding:0 4px;color:var(--button-text)}.setting-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px}.setting-grid.theme{grid-template-columns:repeat(2,1fr)}.setting-row{display:flex;align-items:center;justify-content:space-between;gap:5px;margin:4px 0}.setting-grid label{display:flex;flex-direction:column;align-items:stretch;gap:2px;white-space:nowrap}.setting-grid.theme label{display:grid;grid-template-columns:1fr 30px;align-items:center;gap:3px}.settings-panel input[type=number],.settings-panel select{min-width:0;width:100%;height:19px;padding:1px 2px;border:1px solid var(--button-border);background:#071331;color:var(--button-text);font:10px monospace}.setting-row input[type=number]{width:48px}.setting-row select{width:132px}.settings-panel input[type=color]{width:30px;height:20px;padding:1px;border:1px solid var(--button-border);background:#071331}.settings-hint{margin:3px 0 0;color:#b9d9ff}.skin-actions,.settings-actions{display:flex;align-items:center;justify-content:flex-end;gap:5px}.skin-action,.reset-settings{height:23px;padding:0 8px;font:10px/18px ui-monospace,SFMono-Regular,Consolas,monospace}.skin-status{min-height:12px;margin:3px 0 0;color:#b9d9ff;overflow-wrap:anywhere}
 .feed-flight-guide{position:absolute;left:calc(148px + var(--feed-offset-x) - var(--food-distance));bottom:calc(102px - var(--feed-offset-y));width:var(--food-distance);height:0;border-top:2px dashed #ff5b72;z-index:34;pointer-events:none}.feed-flight-guide::before{content:'';position:absolute;left:-3px;top:-4px;width:6px;height:6px;border:1px solid #fff;background:#ff304c}.feed-distance-label{position:absolute;left:50%;top:-15px;transform:translateX(-50%);padding:1px 3px;background:#81162b;color:#fff;white-space:nowrap;font:9px/11px monospace}.feed-target-marker{position:absolute;left:calc(148px + var(--feed-offset-x));bottom:calc(102px - var(--feed-offset-y));width:19px;height:19px;transform:translate(-50%,50%);border:1px solid #fff;background:rgba(255,48,76,.25);z-index:35;pointer-events:none}.feed-target-marker::before,.feed-target-marker::after{content:'';position:absolute;background:#ff304c}.feed-target-marker::before{left:8px;top:-5px;width:2px;height:27px}.feed-target-marker::after{left:-5px;top:8px;width:27px;height:2px}.feed-target-label{position:absolute;right:13px;top:-13px;padding:1px 3px;background:#81162b;color:#fff;white-space:nowrap;font:9px/11px monospace}
 @keyframes eatPath{0%{transform:translate(0,0);opacity:1}45%{transform:translate(var(--food-half-distance),0);opacity:1}89%{transform:translate(var(--food-distance),0);opacity:1}89.1%,100%{transform:translate(var(--food-distance),0);opacity:0}}
 @media (prefers-reduced-motion:reduce){.bowl.eating{animation-duration:1ms}}
@@ -50,6 +51,16 @@ const settingsMarkup = String.raw`
     <p class="settings-hint">红色十字是食物消失位置，单位为像素。</p>
   </fieldset>
   <div class="setting-row"><label for="pet-initial-scale">初始化尺寸</label><span><input id="pet-initial-scale" type="number" min="60" max="200" step="5" data-setting="initialScalePercent">%</span></div>
+  <fieldset>
+    <legend>模块化皮肤</legend>
+    <div class="setting-row"><label for="appendage-mode">下身形态</label><select id="appendage-mode" data-setting="appendageMode"><option value="tail">鲸尾</option><option value="legs">腿</option></select></div>
+    <div class="setting-row leg-setting" data-leg-setting hidden><label for="leg-style">腿部样式</label><select id="leg-style" data-setting="legStyle"><option value="bare">光腿</option><option value="black-stockings">黑丝</option><option value="white-stockings">白丝</option></select></div>
+    <div class="setting-row leg-setting" data-leg-setting hidden><label for="leg-footwear">脚部选项</label><select id="leg-footwear" data-setting="legFootwear"><option value="barefoot">光脚</option><option value="shoes">穿鞋</option></select></div>
+    <div class="setting-row"><label for="active-skin">当前皮肤</label><select id="active-skin" data-setting="activeSkinId"><option value="">默认素材</option></select></div>
+    <div class="setting-row"><label for="skin-package">待安装 ZIP</label><select id="skin-package" data-role="skin-package"><option value="">未发现皮肤包</option></select></div>
+    <div class="skin-actions"><button class="skin-action scan-skins" type="button">重新扫描</button><button class="skin-action install-skin" type="button">安装并启用</button></div>
+    <p class="skin-status" aria-live="polite"></p>
+  </fieldset>
   <fieldset>
     <legend>按钮主题色</legend>
     <div class="setting-grid theme">
@@ -74,6 +85,10 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
   private faceLayer: HTMLElement | undefined
   private tailCanvas: HTMLCanvasElement | undefined
   private tailContext: CanvasRenderingContext2D | undefined
+  private legsCanvas: HTMLCanvasElement | undefined
+  private legsContext: CanvasRenderingContext2D | undefined
+  private legImages: LegImages | undefined
+  private legLoadRevision = 0
   private idleFaceUrl = ''
   private feedFaceUrl = ''
   private queue: HTMLElement | undefined
@@ -97,6 +112,7 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
   private resizeHandle: HTMLButtonElement | undefined
   private resizeStart: { x: number, y: number, scale: number } | undefined
   private settingsValue = loadWidgetSettings()
+  private skinCatalog: SkinCatalogV1 = { schema: 'deepseek-token-pet/skins@1', packages: [], installed: [] }
   private settingsPanel: HTMLElement | undefined
   private settingsToggle: HTMLButtonElement | undefined
   private feedTargetMarker: HTMLElement | undefined
@@ -106,6 +122,7 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
     if (event.key !== PET_SETTINGS_STORAGE_KEY) return
     this.settingsValue = loadWidgetSettings()
     this.applySettings(true)
+    this.applyAssets()
     this.setScale(this.settingsValue.initialScalePercent / 100)
   }
 
@@ -159,9 +176,11 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
   updateSettings(patch: PetWidgetSettingsPatch): PetWidgetSettingsV1 {
     const feedChanged = patch.feed !== undefined
     const scaleChanged = patch.initialScalePercent !== undefined
+    const assetsChanged = patch.appendageMode !== undefined || patch.legStyle !== undefined || patch.legFootwear !== undefined || patch.activeSkinId !== undefined
     this.settingsValue = mergeWidgetSettings(this.settingsValue, patch)
     saveWidgetSettings(this.settingsValue)
     this.applySettings(feedChanged)
+    if (assetsChanged) this.applyAssets()
     if (scaleChanged) this.setScale(this.settingsValue.initialScalePercent / 100)
     this.dispatchSettingsChange()
     return this.settings
@@ -171,6 +190,7 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
     this.settingsValue = cloneWidgetSettings(DEFAULT_WIDGET_SETTINGS)
     saveWidgetSettings(this.settingsValue)
     this.applySettings(true)
+    this.applyAssets()
     this.setScale(this.settingsValue.initialScalePercent / 100)
     this.dispatchSettingsChange()
     return this.settings
@@ -191,12 +211,14 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
 
   private mount(): void {
     this.rootNode = this.attachShadow({ mode: 'open' })
-    this.rootNode.innerHTML = `<style>${styles}</style><div class="root"><div class="stage"><div class="queue"></div><div class="character"><canvas class="tail-canvas" width="135" height="96" data-joints="6" data-resample="2.667" data-root-width="84" data-tip-width="32"></canvas><div class="character-layer character-body"></div><div class="character-layer character-face" data-frame="0" data-expression="idle"></div></div></div><div class="hud"><div class="meter" title="下一碗饭进度"><div class="fill"></div></div><span class="bowl-count"></span></div><button class="manual-feed" type="button" title="只播放动画，不增加 token">喂饭</button><button class="resize-handle" type="button" aria-label="拖动缩放" title="拖动缩放"></button>${settingsMarkup}</div>`
+    this.rootNode.innerHTML = `<style>${styles}</style><div class="root"><div class="stage"><div class="queue"></div><div class="character"><canvas class="appendage-canvas tail-canvas" width="135" height="96" data-joints="6" data-resample="2.667" data-root-width="84" data-tip-width="32"></canvas><canvas class="appendage-canvas legs-canvas" width="135" height="96" data-bones-per-leg="2" data-resample="2.667" data-static-pose="false" data-animation="alternating" hidden></canvas><div class="character-layer character-body"></div><div class="character-layer character-face" data-frame="0" data-expression="idle"></div></div></div><div class="hud"><div class="meter" title="下一碗饭进度"><div class="fill"></div></div><span class="bowl-count"></span></div><button class="manual-feed" type="button" title="只播放动画，不增加 token">喂饭</button><button class="resize-handle" type="button" aria-label="拖动缩放" title="拖动缩放"></button>${settingsMarkup}</div>`
     this.character = this.rootNode.querySelector<HTMLElement>('.character') ?? undefined
     this.bodyLayer = this.rootNode.querySelector<HTMLElement>('.character-body') ?? undefined
     this.faceLayer = this.rootNode.querySelector<HTMLElement>('.character-face') ?? undefined
     this.tailCanvas = this.rootNode.querySelector<HTMLCanvasElement>('.tail-canvas') ?? undefined
     if (this.tailCanvas !== undefined && globalThis.CanvasRenderingContext2D !== undefined) this.tailContext = this.tailCanvas.getContext('2d') ?? undefined
+    this.legsCanvas = this.rootNode.querySelector<HTMLCanvasElement>('.legs-canvas') ?? undefined
+    if (this.legsCanvas !== undefined && globalThis.CanvasRenderingContext2D !== undefined) this.legsContext = this.legsCanvas.getContext('2d') ?? undefined
     this.queue = this.rootNode.querySelector<HTMLElement>('.queue') ?? undefined
     this.fill = this.rootNode.querySelector<HTMLElement>('.fill') ?? undefined
     this.bowlCountLabel = this.rootNode.querySelector<HTMLElement>('.bowl-count') ?? undefined
@@ -211,6 +233,9 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
     this.rootNode.querySelector<HTMLButtonElement>('.settings-close')?.addEventListener('click', () => this.toggleSettings(false))
     this.rootNode.querySelector<HTMLButtonElement>('.reset-settings')?.addEventListener('click', () => this.resetSettings())
     this.settingsPanel?.addEventListener('input', event => this.handleSettingsInput(event))
+    this.settingsPanel?.addEventListener('change', event => this.handleSettingsInput(event))
+    this.rootNode.querySelector<HTMLButtonElement>('.scan-skins')?.addEventListener('click', () => { void this.loadSkins(this.endpoint(), true) })
+    this.rootNode.querySelector<HTMLButtonElement>('.install-skin')?.addEventListener('click', () => { void this.installSelectedSkin() })
     this.resizeHandle?.addEventListener('pointerdown', event => this.beginResize(event))
     this.resizeHandle?.addEventListener('pointermove', event => this.resizeFromPointer(event))
     this.resizeHandle?.addEventListener('pointerup', event => this.endResize(event))
@@ -218,7 +243,7 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
     this.lastObservedTotal = this.snapshotValue.totalTokens
     this.applyAssets()
     this.updateTailSpeed()
-    this.drawTail()
+    this.drawAppendage()
     this.renderState()
     this.applySettings()
     this.applyScale(this.hasAttribute('scale') ? Number(this.getAttribute('scale')) : this.settingsValue.initialScalePercent / 100)
@@ -231,25 +256,32 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
     if (this.feedTargetMarker !== undefined) this.feedTargetMarker.hidden = !open
     if (this.feedFlightGuide !== undefined) this.feedFlightGuide.hidden = !open
     this.settingsToggle?.setAttribute('aria-expanded', String(open))
-    if (open) this.syncSettingsForm()
+    if (open) {
+      this.syncSettingsForm()
+      void this.loadSkins(this.endpoint())
+    }
   }
 
   private handleSettingsInput(event: Event): void {
-    const input = event.target
-    if (!(input instanceof HTMLInputElement)) return
-    const setting = input.dataset.setting
+    const control = event.target
+    if (!(control instanceof HTMLInputElement) && !(control instanceof HTMLSelectElement)) return
+    const setting = control.dataset.setting
     if (setting === undefined) return
-    const numericValue = input.type === 'number' ? input.valueAsNumber : undefined
-    if (input.type === 'number' && !Number.isFinite(numericValue)) return
+    const numericValue = control instanceof HTMLInputElement && control.type === 'number' ? control.valueAsNumber : undefined
+    if (control instanceof HTMLInputElement && control.type === 'number' && !Number.isFinite(numericValue)) return
     switch (setting) {
       case 'feed.offsetX': this.updateSettings({ feed: { offsetX: numericValue as number } }); break
       case 'feed.offsetY': this.updateSettings({ feed: { offsetY: numericValue as number } }); break
       case 'feed.distance': this.updateSettings({ feed: { distance: numericValue as number } }); break
       case 'initialScalePercent': this.updateSettings({ initialScalePercent: numericValue as number }); break
-      case 'theme.buttonBackground': this.updateSettings({ theme: { buttonBackground: input.value } }); break
-      case 'theme.buttonBorder': this.updateSettings({ theme: { buttonBorder: input.value } }); break
-      case 'theme.buttonText': this.updateSettings({ theme: { buttonText: input.value } }); break
-      case 'theme.progressFill': this.updateSettings({ theme: { progressFill: input.value } }); break
+      case 'appendageMode': if (control.value === 'tail' || control.value === 'legs') this.updateSettings({ appendageMode: control.value }); break
+      case 'legStyle': if (control.value === 'bare' || control.value === 'black-stockings' || control.value === 'white-stockings') this.updateSettings({ legStyle: control.value }); break
+      case 'legFootwear': if (control.value === 'barefoot' || control.value === 'shoes') this.updateSettings({ legFootwear: control.value }); break
+      case 'activeSkinId': this.updateSettings({ activeSkinId: control.value }); break
+      case 'theme.buttonBackground': this.updateSettings({ theme: { buttonBackground: control.value } }); break
+      case 'theme.buttonBorder': this.updateSettings({ theme: { buttonBorder: control.value } }); break
+      case 'theme.buttonText': this.updateSettings({ theme: { buttonText: control.value } }); break
+      case 'theme.progressFill': this.updateSettings({ theme: { progressFill: control.value } }); break
     }
   }
 
@@ -264,6 +296,16 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
     this.style.setProperty('--button-text', theme.buttonText)
     this.style.setProperty('--progress-fill', theme.progressFill)
     if (this.feedDistanceLabel !== undefined) this.feedDistanceLabel.textContent = `${feed.distance}px`
+    if (this.tailCanvas !== undefined) this.tailCanvas.hidden = this.settingsValue.appendageMode !== 'tail'
+    if (this.legsCanvas !== undefined) {
+      this.legsCanvas.hidden = this.settingsValue.appendageMode !== 'legs'
+      this.legsCanvas.dataset.legStyle = this.settingsValue.legStyle
+      this.legsCanvas.dataset.footwear = this.settingsValue.legFootwear
+      this.legsCanvas.dataset.skinId = this.settingsValue.activeSkinId
+    }
+    for (const row of this.settingsPanel?.querySelectorAll<HTMLElement>('[data-leg-setting]') ?? []) {
+      row.hidden = this.settingsValue.appendageMode !== 'legs'
+    }
     this.syncSettingsForm()
     if (reloadFoodAnimation) this.reloadFoodAnimation()
   }
@@ -275,6 +317,10 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
       'feed.offsetY': String(this.settingsValue.feed.offsetY),
       'feed.distance': String(this.settingsValue.feed.distance),
       initialScalePercent: String(this.settingsValue.initialScalePercent),
+      appendageMode: this.settingsValue.appendageMode,
+      legStyle: this.settingsValue.legStyle,
+      legFootwear: this.settingsValue.legFootwear,
+      activeSkinId: this.settingsValue.activeSkinId,
       'theme.buttonBackground': this.settingsValue.theme.buttonBackground,
       'theme.buttonBorder': this.settingsValue.theme.buttonBorder,
       'theme.buttonText': this.settingsValue.theme.buttonText,
@@ -284,6 +330,11 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
       const value = values[input.dataset.setting ?? '']
       if (value !== undefined && input.value !== value) input.value = value
     }
+    for (const select of this.settingsPanel.querySelectorAll<HTMLSelectElement>('select[data-setting]')) {
+      const value = values[select.dataset.setting ?? '']
+      if (value !== undefined && select.value !== value) select.value = value
+    }
+    this.renderSkinOptions()
   }
 
   private reloadFoodAnimation(): void {
@@ -337,11 +388,116 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
 
   private applyAssets(): void {
     const base = (this.getAttribute('asset-base') ?? '/assets').replace(/\/$/, '')
-    this.idleFaceUrl = versionAsset(`${base}/character-face-idle.png`)
-    this.feedFaceUrl = versionAsset(`${base}/character-face-feed.png`)
-    if (this.bodyLayer !== undefined) this.bodyLayer.style.backgroundImage = `url(${JSON.stringify(versionAsset(`${base}/character-body.png`))})`
+    const skin = this.activeSkin()
+    this.idleFaceUrl = this.skinAssetUrl(skin?.assetUrls.faceIdle) ?? versionAsset(`${base}/character-face-idle.png`)
+    this.feedFaceUrl = this.skinAssetUrl(skin?.assetUrls.faceFeed) ?? versionAsset(`${base}/character-face-feed.png`)
+    const bodyUrl = this.skinAssetUrl(skin?.assetUrls.body) ?? versionAsset(`${base}/character-body.png`)
+    if (this.bodyLayer !== undefined) this.bodyLayer.style.backgroundImage = `url(${JSON.stringify(bodyUrl)})`
     this.setFaceMode('idle', 0)
-    this.foods = [fallbackFood(base)]
+    void this.loadLegImages(skin)
+  }
+
+  private activeSkin(): InstalledSkinV1 | undefined {
+    return this.skinCatalog.installed.find(skin => skin.id === this.settingsValue.activeSkinId)
+  }
+
+  private skinAssetUrl(path: string | undefined): string | undefined {
+    if (path === undefined) return undefined
+    const endpoint = this.endpoint()
+    if (endpoint === undefined) return undefined
+    return versionAsset(new URL(path, `${endpoint}/`).href)
+  }
+
+  private async loadLegImages(skin = this.activeSkin()): Promise<void> {
+    if (typeof Image === 'undefined') return
+    const revision = ++this.legLoadRevision
+    const base = (this.getAttribute('asset-base') ?? '/assets').replace(/\/$/, '')
+    const style = this.settingsValue.legStyle
+    const builtIn = (part: keyof LegImages): string => {
+      if (part === 'shoeFar') return versionAsset(`${base}/legs/shoe-far.png`)
+      if (part === 'shoeNear') return versionAsset(`${base}/legs/shoe-near.png`)
+      if (part === 'footFar') return versionAsset(`${base}/legs/${style}/foot-far.png`)
+      if (part === 'footNear') return versionAsset(`${base}/legs/${style}/foot-near.png`)
+      return versionAsset(`${base}/legs/${style}/${part}.svg`)
+    }
+    const requested = (part: keyof LegImages): string => {
+      const shared = part === 'footFar' || part === 'footNear' ? skin?.assetUrls.foot : part === 'shoeFar' || part === 'shoeNear' ? skin?.assetUrls.shoe : undefined
+      return this.skinAssetUrl(skin?.assetUrls[part] ?? shared) ?? builtIn(part)
+    }
+    try {
+      const entries = await Promise.all((['thigh', 'calf', 'footFar', 'footNear', 'shoeFar', 'shoeNear'] as const).map(async part => [part, await loadImageWithFallback(requested(part), builtIn(part))] as const))
+      if (revision !== this.legLoadRevision) return
+      this.legImages = Object.fromEntries(entries) as unknown as LegImages
+      this.drawAppendage()
+    } catch {
+      if (revision === this.legLoadRevision) this.legImages = undefined
+    }
+  }
+
+  private async loadSkins(endpoint: string | undefined, report = false): Promise<void> {
+    if (endpoint === undefined) {
+      this.skinCatalog = { schema: 'deepseek-token-pet/skins@1', packages: [], installed: [] }
+      this.renderSkinOptions()
+      if (report) this.setSkinStatus('独立嵌入模式无法扫描本地 skin 目录。')
+      return
+    }
+    try {
+      const response = await fetch(`${endpoint}/v1/skins`, { cache: 'no-store' })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const catalog = await response.json() as SkinCatalogV1
+      if (catalog.schema !== 'deepseek-token-pet/skins@1') throw new Error('皮肤目录格式不受支持')
+      this.skinCatalog = catalog
+      this.renderSkinOptions()
+      this.applyAssets()
+      if (report) this.setSkinStatus(`发现 ${catalog.packages.length} 个 ZIP，已安装 ${catalog.installed.length} 个皮肤。`)
+    } catch (error) {
+      if (report) this.setSkinStatus(`扫描失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  private renderSkinOptions(): void {
+    const installed = this.settingsPanel?.querySelector<HTMLSelectElement>('select[data-setting="activeSkinId"]')
+    if (installed !== null && installed !== undefined) {
+      const options = [new Option('默认素材', '')]
+      for (const skin of this.skinCatalog.installed) options.push(new Option(`${skin.name} (${skin.version})`, skin.id))
+      installed.replaceChildren(...options)
+      installed.value = this.settingsValue.activeSkinId
+    }
+    const packages = this.settingsPanel?.querySelector<HTMLSelectElement>('select[data-role="skin-package"]')
+    if (packages !== null && packages !== undefined) {
+      const valid = this.skinCatalog.packages.filter((entry): entry is SkinPackageV1 & { manifest: NonNullable<SkinPackageV1['manifest']> } => entry.manifest !== undefined)
+      const options = valid.length === 0 ? [new Option('未发现有效皮肤包', '')] : valid.map(entry => new Option(`${entry.manifest.name} · ${entry.file}`, entry.file))
+      packages.replaceChildren(...options)
+    }
+  }
+
+  private async installSelectedSkin(): Promise<void> {
+    const endpoint = this.endpoint()
+    const packageSelect = this.settingsPanel?.querySelector<HTMLSelectElement>('select[data-role="skin-package"]')
+    if (endpoint === undefined || packageSelect === null || packageSelect === undefined || packageSelect.value === '') {
+      this.setSkinStatus('请先把有效 ZIP 放进 skin 目录并重新扫描。')
+      return
+    }
+    this.setSkinStatus('正在安装皮肤…')
+    try {
+      const response = await fetch(`${endpoint}/v1/skins/install`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ file: packageSelect.value }) })
+      const result = await response.json() as { installed?: InstalledSkinV1, catalog?: SkinCatalogV1, error?: string }
+      if (!response.ok || result.installed === undefined || result.catalog === undefined) throw new Error(result.error ?? `HTTP ${response.status}`)
+      this.skinCatalog = result.catalog
+      const patch: PetWidgetSettingsPatch = { activeSkinId: result.installed.id }
+      if (result.installed.appendageMode !== undefined) patch.appendageMode = result.installed.appendageMode
+      if (result.installed.legStyle !== undefined) patch.legStyle = result.installed.legStyle
+      this.updateSettings(patch)
+      this.renderSkinOptions()
+      this.setSkinStatus(`已安装并启用：${result.installed.name}`)
+    } catch (error) {
+      this.setSkinStatus(`安装失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  private setSkinStatus(message: string): void {
+    const status = this.settingsPanel?.querySelector<HTMLElement>('.skin-status')
+    if (status !== null && status !== undefined) status.textContent = message
   }
 
   private renderState(): void {
@@ -494,7 +650,7 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
     const elapsed = Math.min(100, Math.max(0, time - this.tailLastFrame))
     this.tailLastFrame = time
     this.tailPhase = (this.tailPhase + elapsed / this.tailDurationMs * Math.PI * 2) % (Math.PI * 2)
-    this.drawTail()
+    this.drawAppendage()
     if (this.tailCanvas !== undefined) this.tailCanvas.dataset.durationMs = String(this.tailDurationMs)
     this.tailFrame = requestAnimationFrame(next => this.animateTail(next))
   }
@@ -509,6 +665,10 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
       this.tailCanvas.dataset.tokens5s = String(tokens)
       this.tailCanvas.dataset.durationMs = String(this.tailDurationMs)
     }
+    if (this.legsCanvas !== undefined) {
+      this.legsCanvas.dataset.tokens5s = String(tokens)
+      this.legsCanvas.dataset.durationMs = String(this.tailDurationMs)
+    }
   }
 
   private setFaceMode(mode: 'idle' | 'feed', frame: number): void {
@@ -516,6 +676,30 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
     this.faceLayer.style.backgroundImage = `url(${JSON.stringify(mode === 'idle' ? this.idleFaceUrl : this.feedFaceUrl)})`
     this.faceLayer.dataset.expression = mode
     this.faceLayer.dataset.frame = String(frame)
+  }
+
+  private drawAppendage(): void {
+    if (this.settingsValue.appendageMode === 'legs') this.drawLegs()
+    else this.drawTail()
+  }
+
+  private drawLegs(): void {
+    const context = this.legsContext
+    const images = this.legImages
+    if (context === undefined) return
+    context.clearRect(0, 0, 135, 96)
+    context.imageSmoothingEnabled = true
+    context.imageSmoothingQuality = 'high'
+    if (images === undefined) return
+    // Animate around the verified prone reference pose exported from the editor.
+    const showShoe = this.settingsValue.legFootwear === 'shoes'
+    const swing = Math.sin(this.tailPhase)
+    drawLeg(context, images, { rootX: 54, rootY: 62.5, thighAngle: 12, calfAngle: -173.13 - swing * 7, footAngle: -17.48 + swing * 10, scale: .74, alpha: .9 }, 'far', showShoe)
+    drawLeg(context, images, { rootX: 62, rootY: 72.1, thighAngle: 8, calfAngle: -165 + swing * 8, footAngle: 14.87 - swing * 8, scale: .78, alpha: 1 }, 'near', showShoe)
+    if (this.legsCanvas !== undefined) {
+      this.legsCanvas.dataset.phase = this.tailPhase.toFixed(3)
+      this.legsCanvas.dataset.durationMs = String(this.tailDurationMs)
+    }
   }
 
   private drawTail(): void {
@@ -573,7 +757,7 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
   private async connectEndpoint(): Promise<void> {
     this.stream?.close()
     const endpoint = this.endpoint()
-    await this.loadFoods(endpoint)
+    await Promise.all([this.loadFoods(endpoint), this.loadSkins(endpoint)])
     if (endpoint === undefined) return
     try {
       const response = await fetch(`${endpoint}/v1/state`)
@@ -588,6 +772,73 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
 
 export function defineDeepseekTokenPet(tagName = 'deepseek-token-pet'): void {
   if (globalThis.customElements !== undefined && customElements.get(tagName) === undefined) customElements.define(tagName, DeepseekTokenPetElement)
+}
+
+interface LegImages {
+  thigh: HTMLImageElement
+  calf: HTMLImageElement
+  footFar: HTMLImageElement
+  footNear: HTMLImageElement
+  shoeFar: HTMLImageElement
+  shoeNear: HTMLImageElement
+}
+
+interface LegPose {
+  rootX: number
+  rootY: number
+  thighAngle: number
+  calfAngle: number
+  footAngle: number
+  scale: number
+  alpha: number
+}
+
+function drawLeg(context: CanvasRenderingContext2D, images: LegImages, pose: LegPose, perspective: 'far' | 'near', showShoe: boolean): void {
+  context.save()
+  context.globalAlpha = pose.alpha
+  context.translate(pose.rootX, pose.rootY)
+  context.scale(pose.scale, pose.scale)
+  context.rotate(pose.thighAngle * Math.PI / 180)
+  context.drawImage(images.thigh, 0, -12, 46, 24)
+  context.translate(40, 0)
+  context.rotate(pose.calfAngle * Math.PI / 180)
+  context.drawImage(images.calf, -12, -5, 24, 54)
+  context.translate(0, 46)
+  context.rotate(pose.footAngle * Math.PI / 180)
+  // Keep feet and footwear fully opaque even when the far limb uses depth alpha.
+  context.globalAlpha = 1
+  context.save()
+  context.scale(-1, 1)
+  // Anatomical right (far, screen-left): 1.4x Y thickness, ankle anchored.
+  if (perspective === 'far') context.drawImage(images.footFar, -.5, -9.1, 24, 19.6)
+  // Anatomical left (near, screen-right): restore the earlier moderate size;
+  // retain ankle anchoring so the heel does not expand into the calf.
+  else context.drawImage(images.footNear, -.5, -10.08, 24, 23.52)
+  context.restore()
+  if (showShoe) {
+    context.save()
+    // The far shoe needs a small counter-clockwise correction relative to its foot.
+    if (perspective === 'far') context.rotate(-3 * Math.PI / 180)
+    context.scale(-1, 1)
+    if (perspective === 'far') context.drawImage(images.shoeFar, -.5, -10.725, 28.6, 23.1)
+    else context.drawImage(images.shoeNear, -.5, -10.627, 26.4, 25.872)
+    context.restore()
+  }
+  context.restore()
+}
+
+function loadImageWithFallback(url: string, fallback: string): Promise<HTMLImageElement> {
+  return loadImage(url).catch(() => url === fallback ? Promise.reject(new Error('leg_asset_load_failed')) : loadImage(fallback))
+}
+
+function loadImage(url: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.decoding = 'async'
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error(`asset_load_failed:${url}`))
+    image.src = url
+  })
 }
 
 interface TailPoint { x: number, y: number }
