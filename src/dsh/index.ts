@@ -1,4 +1,7 @@
+import { existsSync, readFileSync } from 'node:fs'
 import { request } from 'node:http'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { PET_EVENT_SCHEMA, type TokenUsageBreakdown } from '../core/index.js'
@@ -13,6 +16,8 @@ export interface Config {
   heartbeatIntervalMs?: number
   /** How long a pet may stay silent before the plugin reports it disconnected. */
   heartbeatTimeoutMs?: number
+  /** Path to the pet discovery file. Defaults to ~/.deepseek-token-pet.json */
+  discoveryFile?: string
 }
 
 export interface PetConnectionStatus {
@@ -25,7 +30,9 @@ export interface PetConnectionStatus {
 
 export function apply(ctx: Context, config: Config = {}): void {
   ensureLocalhostBypassesProxy()
-  const endpoint = (config.endpoint ?? 'http://127.0.0.1:47832/v1/events').replace(/\/$/, '')
+  const discovered = readDiscovery(config.discoveryFile)
+  const endpoint = (config.endpoint ?? (discovered?.url === undefined ? 'http://127.0.0.1:47832/v1/events' : `${discovered.url}/v1/events`)).replace(/\/$/, '')
+  const authToken = discovered?.authToken
   const source = config.source ?? 'deepseek-harness'
   const heartbeatIntervalMs = config.heartbeatIntervalMs ?? 10_000
 
@@ -54,7 +61,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     warned = true
   }
   const postJson = (url: string, payload: unknown): Promise<unknown> => {
-    return httpJson('POST', url, payload, 2500)
+    return httpJson('POST', url, payload, 2500, authToken)
   }
   const send = (payload: unknown): void => {
     chain = chain.then(async () => {
@@ -73,7 +80,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       .catch((error: unknown) => {
         // Older pet builds may not implement /v1/heartbeat yet; fall back to
         // the state endpoint so the plugin still reports a valid connection.
-        void httpJson('GET', stateUrl.toString(), undefined, 2500)
+        void httpJson('GET', stateUrl.toString(), undefined, 2500, authToken)
           .then(markConnected)
           .catch(() => markDisconnected(error))
       })
@@ -114,10 +121,25 @@ function ensureLocalhostBypassesProxy(): void {
   process.env.no_proxy = process.env.NO_PROXY
 }
 
-function httpJson(method: 'GET' | 'POST', url: string, payload?: unknown, timeoutMs = 2500): Promise<unknown> {
+function readDiscovery(discoveryFile?: string): { url?: string; authToken?: string } | undefined {
+  const file = discoveryFile ?? join(homedir(), '.deepseek-token-pet.json')
+  try {
+    if (!existsSync(file)) return undefined
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as { url?: unknown; authToken?: unknown }
+    const result: { url?: string; authToken?: string } = {}
+    if (typeof parsed.url === 'string') result.url = parsed.url
+    if (typeof parsed.authToken === 'string') result.authToken = parsed.authToken
+    return result
+  } catch {
+    return undefined
+  }
+}
+
+function httpJson(method: 'GET' | 'POST', url: string, payload?: unknown, timeoutMs = 2500, authToken?: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let body: string | undefined
     const headers: Record<string, string> = {}
+    if (authToken !== undefined) headers.authorization = `Bearer ${authToken}`
     if (payload !== undefined) {
       body = JSON.stringify(payload)
       headers['content-type'] = 'application/json'

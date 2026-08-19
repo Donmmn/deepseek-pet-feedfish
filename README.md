@@ -171,11 +171,13 @@ python examples/python_client.py
 
 ```powershell
 node dist/cli.js serve
-dsh plugin --profile web add ./release/deepseek-token-pet-0.2.6.tgz
+dsh plugin --profile web add ./release/deepseek-token-pet-0.4.0.tgz
 dsh --profile web web
 ```
 
 适配器订阅 Harness 的 `session/event`，把 `assistant/chunk` 和 `assistant/message` 中的 usage 转成 `sample` 事件，并把 thinking、tool、done、error 等状态同步给桌宠。适配器入口位于 `src/dsh/index.ts`，连接配置位于 `cordis.patch.yml`。
+
+插件默认通过 `~/.deepseek-token-pet.json` 自动发现桌宠地址和鉴权 token；如果桌宠还没启动，会回退到 `http://127.0.0.1:47832`。也可以在插件配置里显式指定 `endpoint` 或 `discoveryFile`。
 
 ## 嵌入其他客户端
 
@@ -215,12 +217,16 @@ import { TokenPetLedger, petEvent } from 'deepseek-token-pet/core'
 
 | 方法 | 地址 | 用途 |
 |---|---|---|
+| `GET` | `/v1/info` | 获取协议版本、服务能力、心跳超时等信息 |
+| `GET` | `/v1/discovery` | 获取当前实例的地址、PID、鉴权 token 等发现信息 |
 | `POST` | `/v1/events` | 写入 usage、activity 或 reset 事件 |
 | `POST` | `/v1/heartbeat` | DSH 插件心跳，用于显示连接状态 |
 | `GET` | `/v1/state` | 获取当前 token、食物和活动状态 |
 | `GET` | `/v1/stream` | 订阅 `state` 类型的 SSE 快照 |
 | `GET` | `/v1/foods` | 查看启动时扫描的食物清单 |
 | `POST` | `/v1/bowls/{index}/ack` | 确认第 index 份食物动画已完成 |
+
+服务启动时会额外写一份 `~/.deepseek-token-pet.json` 发现文件，包含 `url`、`port`、`authToken`、`protocolVersion` 等字段，方便插件自动发现。`authToken` 默认生成；目前 `requireAuth` 默认关闭以兼容旧客户端，后续可开启后要求写接口携带 `Authorization: Bearer <token>`。
 
 `state` 中的 `dshConnected`、`dshSource`、`dshLastSeenAt` 表示 DSH 插件最近一次心跳是否在有效窗口内。`activity` 可用值：`idle`、`thinking`、`tool`、`waiting`、`error`、`done`。`reset` 是显式管理操作，普通适配器不应自动发送。
 

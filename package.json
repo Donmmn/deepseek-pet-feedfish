@@ -1,6 +1,6 @@
 {
   "name": "deepseek-token-pet",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Portable token-driven pixel desktop pet with a DeepSeek Harness adapter",
   "author": "DeepSeek Token Pet contributors",
   "type": "module",

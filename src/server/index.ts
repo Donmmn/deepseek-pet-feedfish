@@ -1,7 +1,9 @@
 import { EventEmitter } from 'node:events'
-import { createReadStream, existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { createReadStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { extname, join, resolve, sep } from 'node:path'
+import { homedir } from 'node:os'
+import { dirname, extname, join, resolve, sep } from 'node:path'
 import { TokenPetLedger, type LedgerSeed, type PetSnapshotV1 } from '../core/index.js'
 import { scanFoodCatalog, type FoodCatalogV1 } from './food-catalog.js'
 
@@ -12,6 +14,34 @@ export interface PetServerOptions {
   port?: number
   stateFile?: string
   packageRoot?: string
+  /** Optional pre-shared token. A random one is generated when omitted. */
+  authToken?: string
+  /** Require Bearer auth on write endpoints. Defaults to false for backward compatibility. */
+  requireAuth?: boolean
+  /** Where to publish endpoint discovery metadata. Defaults to ~/.deepseek-token-pet.json */
+  discoveryFile?: string
+}
+
+export interface PetDiscoveryV1 {
+  schema: 'deepseek-token-pet/discovery@1'
+  url: string
+  host: string
+  port: number
+  pid: number
+  protocolVersion: string
+  serverVersion: string
+  authToken?: string
+  requireAuth: boolean
+  startedAt: number
+}
+
+export interface PetServerInfoV1 {
+  schema: 'deepseek-token-pet/info@1'
+  protocolVersion: string
+  serverVersion: string
+  capabilities: string[]
+  heartbeatTimeoutMs: number
+  authRequired: boolean
 }
 
 export interface RunningPetServer {
@@ -19,8 +49,14 @@ export interface RunningPetServer {
   url: string
   state: () => PetSnapshotV1
   foods: FoodCatalogV1
+  info: () => PetServerInfoV1
+  discovery: () => PetDiscoveryV1
   close: () => Promise<void>
 }
+
+export const PET_PROTOCOL_VERSION = 'deepseek-token-pet/protocol@1'
+export const PET_SERVER_VERSION = '0.4.0'
+export const DEFAULT_DISCOVERY_FILE = join(homedir(), '.deepseek-token-pet.json')
 
 const DSH_HEARTBEAT_TIMEOUT_MS = 30_000
 
@@ -64,6 +100,9 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
   const assetRoot = resolve(packageRoot, 'assets')
   const foodCatalog = scanFoodCatalog(resolve(assetRoot, 'foods'))
   const store = new PetStore(options.stateFile)
+  const authToken = options.authToken ?? randomBytes(24).toString('hex')
+  const requireAuth = options.requireAuth ?? false
+  const discoveryFile = resolve(options.discoveryFile ?? DEFAULT_DISCOVERY_FILE)
   const clients = new Set<ServerResponse>()
   const broadcast = (state: PetSnapshotV1): void => {
     const payload = `event: state\ndata: ${JSON.stringify(state)}\n\n`
@@ -71,13 +110,34 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
   }
   store.on('state', broadcast)
 
+  const authorized = (request: IncomingMessage): boolean => {
+    if (!requireAuth) return true
+    return request.headers.authorization === `Bearer ${authToken}`
+  }
+  const writeGuard = (request: IncomingMessage, response: ServerResponse): boolean => {
+    if (authorized(request)) return true
+    json(response, 401, { error: 'unauthorized' })
+    return false
+  }
+
   const server = createServer(async (request, response) => {
     cors(response)
     if (request.method === 'OPTIONS') { response.writeHead(204).end(); return }
     const url = new URL(request.url ?? '/', `http://${request.headers.host ?? `${host}:${port}`}`)
     try {
+      if (request.method === 'GET' && url.pathname === '/v1/info') {
+        return json(response, 200, {
+          schema: 'deepseek-token-pet/info@1',
+          protocolVersion: PET_PROTOCOL_VERSION,
+          serverVersion: PET_SERVER_VERSION,
+          capabilities: ['events', 'heartbeat', 'state', 'stream', 'foods', 'bowls', 'discovery'],
+          heartbeatTimeoutMs: DSH_HEARTBEAT_TIMEOUT_MS,
+          authRequired: requireAuth,
+        })
+      }
       if (request.method === 'GET' && url.pathname === '/v1/state') return json(response, 200, store.snapshot())
       if (request.method === 'GET' && url.pathname === '/v1/foods') return json(response, 200, foodCatalog)
+      if (request.method === 'GET' && url.pathname === '/v1/discovery') return json(response, 200, discovery())
       if (request.method === 'GET' && url.pathname === '/v1/stream') {
         response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' })
         clients.add(response)
@@ -86,6 +146,7 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
         return
       }
       if (request.method === 'POST' && url.pathname === '/v1/heartbeat') {
+        if (!writeGuard(request, response)) return
         const body = await readJson(request) as { source?: unknown }
         if (typeof body?.source !== 'string' || body.source.length === 0) {
           return json(response, 400, { error: 'source_required' })
@@ -94,6 +155,7 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
         return json(response, 200, { ok: true, state: store.publish() })
       }
       if (request.method === 'POST' && url.pathname === '/v1/events') {
+        if (!writeGuard(request, response)) return
         const body = await readJson(request)
         const events = Array.isArray(body) ? body : [body]
         const results = events.map(event => store.ledger.ingest(event))
@@ -102,6 +164,7 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
       }
       const ack = request.method === 'POST' ? /^\/v1\/bowls\/(\d+)\/ack$/.exec(url.pathname) : null
       if (ack !== null) {
+        if (!writeGuard(request, response)) return
         store.ledger.acknowledgeBowl(Number(ack[1]))
         return json(response, 200, store.publish())
       }
@@ -124,16 +187,60 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
   const address = server.address()
   const actualPort = typeof address === 'object' && address !== null ? address.port : port
   const url = `http://${host}:${actualPort}`
+  let discovery: () => PetDiscoveryV1
+  const info = (): PetServerInfoV1 => ({
+    schema: 'deepseek-token-pet/info@1',
+    protocolVersion: PET_PROTOCOL_VERSION,
+    serverVersion: PET_SERVER_VERSION,
+    capabilities: ['events', 'heartbeat', 'state', 'stream', 'foods', 'bowls', 'discovery'],
+    heartbeatTimeoutMs: DSH_HEARTBEAT_TIMEOUT_MS,
+    authRequired: requireAuth,
+  })
+  const writeDiscovery = (): void => {
+    discovery = () => ({
+      schema: 'deepseek-token-pet/discovery@1',
+      url,
+      host,
+      port: actualPort,
+      pid: process.pid,
+      protocolVersion: PET_PROTOCOL_VERSION,
+      serverVersion: PET_SERVER_VERSION,
+      authToken,
+      requireAuth,
+      startedAt: Date.now(),
+    })
+    const payload = `${JSON.stringify(discovery(), null, 2)}\n`
+    mkdirSync(dirname(discoveryFile), { recursive: true })
+    writeFileSync(discoveryFile, payload, 'utf8')
+  }
+  writeDiscovery()
   return {
     server, url,
     state: () => store.snapshot(), foods: foodCatalog,
-    close: () => new Promise<void>((resolveClose, reject) => server.close(error => error === undefined ? resolveClose() : reject(error))),
+    info,
+    discovery: () => discovery(),
+    close: () => new Promise<void>((resolveClose, reject) => {
+      server.close(error => {
+        if (error !== undefined) { reject(error); return }
+        try {
+          if (existsSync(discoveryFile)) {
+            const current = JSON.parse(readFileSync(discoveryFile, 'utf8')) as PetDiscoveryV1
+            if (current.url === url && current.pid === process.pid && current.authToken === authToken) {
+              rmSync(discoveryFile, { force: true })
+            }
+          }
+        } catch {
+          // Best-effort cleanup; stale discovery files are overwritten on next start.
+        }
+        resolveClose()
+      })
+    }),
   }
 }
 
 function cors(response: ServerResponse): void {
   response.setHeader('Access-Control-Allow-Origin', '*')
-  response.setHeader('Access-Control-Allow-Headers', 'content-type')
+  response.setHeader('Access-Control-Allow-Headers', 'content-type, authorization')
   response.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
 }
 function json(response: ServerResponse, status: number, value: unknown): void { response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify(value)) }
