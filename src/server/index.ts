@@ -211,7 +211,7 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
     })
     const payload = `${JSON.stringify(discovery(), null, 2)}\n`
     mkdirSync(dirname(discoveryFile), { recursive: true })
-    writeFileSync(discoveryFile, payload, 'utf8')
+    writeFileSync(discoveryFile, payload, { encoding: 'utf8', mode: 0o600 })
   }
   writeDiscovery()
   return {
