@@ -171,13 +171,15 @@ python examples/python_client.py
 
 ```powershell
 node dist/cli.js serve
-dsh plugin --profile web add ./release/deepseek-token-pet-0.4.0.tgz
+dsh plugin --profile web add ./release/deepseek-token-pet-0.5.0.tgz
 dsh --profile web web
 ```
 
 适配器订阅 Harness 的 `session/event`，把 `assistant/chunk` 和 `assistant/message` 中的 usage 转成 `sample` 事件，并把 thinking、tool、done、error 等状态同步给桌宠。适配器入口位于 `src/dsh/index.ts`，连接配置位于 `cordis.patch.yml`。
 
 插件默认通过 `~/.deepseek-token-pet.json` 自动发现桌宠地址和鉴权 token；如果桌宠还没启动，会回退到 `http://127.0.0.1:47832`。也可以在插件配置里显式指定 `endpoint` 或 `discoveryFile`。
+
+DSH 插件会优先使用 WebSocket 持久连接（`/v1/ws`）发送心跳和事件；桌宠不支持 WS 时自动回退到 HTTP。usage 事件默认 150ms 合并成一批发送，activity 事件立即发送，保证 UI 状态及时。
 
 ## 嵌入其他客户端
 
@@ -219,8 +221,9 @@ import { TokenPetLedger, petEvent } from 'deepseek-token-pet/core'
 |---|---|---|
 | `GET` | `/v1/info` | 获取协议版本、服务能力、心跳超时等信息 |
 | `GET` | `/v1/discovery` | 获取当前实例的地址、PID、鉴权 token 等发现信息 |
-| `POST` | `/v1/events` | 写入 usage、activity 或 reset 事件 |
-| `POST` | `/v1/heartbeat` | DSH 插件心跳，用于显示连接状态 |
+| `WS` | `/v1/ws?source=...&token=...` | WebSocket 持久连接，支持 heartbeat、event/events、state 推送 |
+| `POST` | `/v1/events` | 写入 usage、activity 或 reset 事件（HTTP 回退） |
+| `POST` | `/v1/heartbeat` | DSH 插件心跳，用于显示连接状态（HTTP 回退） |
 | `GET` | `/v1/state` | 获取当前 token、食物和活动状态 |
 | `GET` | `/v1/stream` | 订阅 `state` 类型的 SSE 快照 |
 | `GET` | `/v1/foods` | 查看启动时扫描的食物清单 |

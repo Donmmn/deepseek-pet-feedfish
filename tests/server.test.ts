@@ -2,6 +2,7 @@ import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import WebSocket from 'ws'
 import { createPetServer, type RunningPetServer } from '../src/server/index.js'
 import { PET_EVENT_SCHEMA } from '../src/core/index.js'
 
@@ -73,5 +74,34 @@ describe('HTTP bridge', () => {
     })
     expect(accepted.status).toBe(202)
     expect(runtime.state().totalTokens).toBe(1)
+  })
+
+  it('accepts heartbeat and events over WebSocket', async () => {
+    runtime = await createPetServer({ port: 0, packageRoot: process.cwd(), authToken: 'secret', requireAuth: true, discoveryFile })
+    const wsUrl = `${runtime.url.replace('http', 'ws')}/v1/ws?source=ws-test&token=secret`
+    const socket = new WebSocket(wsUrl)
+    const messages: Array<Record<string, unknown>> = []
+    const opened = new Promise<void>((resolve, reject) => {
+      socket.once('open', resolve)
+      socket.once('error', reject)
+    })
+    socket.on('message', data => {
+      messages.push(JSON.parse(String(data)) as Record<string, unknown>)
+    })
+    await opened
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(messages.some(message => message.type === 'hello')).toBe(true)
+
+    socket.send(JSON.stringify({ type: 'heartbeat', source: 'ws-test', time: Date.now() }))
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(messages.some(message => message.type === 'pong')).toBe(true)
+    expect(runtime.state().dshConnected).toBe(true)
+
+    const event = { schema: PET_EVENT_SCHEMA, id: 'ws-1', timestamp: Date.now(), source: 'ws-test', type: 'usage', mode: 'delta', usage: { inputTokens: 300_000, outputTokens: 100_000 } }
+    socket.send(JSON.stringify({ type: 'event', event }))
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(messages.some(message => message.type === 'ack')).toBe(true)
+    expect(runtime.state().totalTokens).toBe(400_000)
+    socket.close()
   })
 })

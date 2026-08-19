@@ -4,7 +4,8 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { PET_EVENT_SCHEMA, type TokenUsageBreakdown } from '../core/index.js'
+import WebSocket from 'ws'
+import { PET_EVENT_SCHEMA, type PetSnapshotV1, type TokenUsageBreakdown } from '../core/index.js'
 
 export const name = 'deepseek-token-pet'
 export const inject = ['sessions']
@@ -18,6 +19,8 @@ export interface Config {
   heartbeatTimeoutMs?: number
   /** Path to the pet discovery file. Defaults to ~/.deepseek-token-pet.json */
   discoveryFile?: string
+  /** Use a persistent WebSocket when the pet server supports it. Defaults to true. */
+  useWebSocket?: boolean
 }
 
 export interface PetConnectionStatus {
@@ -35,6 +38,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const authToken = discovered?.authToken
   const source = config.source ?? 'deepseek-harness'
   const heartbeatIntervalMs = config.heartbeatIntervalMs ?? 10_000
+  const useWebSocket = config.useWebSocket ?? true
 
   const endpointUrl = new URL(endpoint)
   const heartbeatUrl = new URL(endpointUrl.origin)
@@ -47,6 +51,14 @@ export function apply(ctx: Context, config: Config = {}): void {
   const status: PetConnectionStatus = { connected: false, endpoint, source, lastError: undefined }
   let warned = false
   let chain = Promise.resolve()
+  let ws: WebSocket | undefined
+  let wsReady = false
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined
+  let reconnectDelay = 1_000
+  let disposed = false
+  let pendingEvents: unknown[] = []
+  let flushTimer: ReturnType<typeof setTimeout> | undefined
+
   const markConnected = (): void => {
     if (!status.connected) ctx.logger?.(name).info(`desktop pet connected: ${endpoint}`)
     status.connected = true
@@ -63,7 +75,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const postJson = (url: string, payload: unknown): Promise<unknown> => {
     return httpJson('POST', url, payload, 2500, authToken)
   }
-  const send = (payload: unknown): void => {
+  const httpSend = (payload: unknown): void => {
     chain = chain.then(async () => {
       try {
         await postJson(endpoint, payload)
@@ -73,8 +85,100 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
     })
   }
+  const wsSend = (payload: unknown): boolean => {
+    if (!wsReady || ws === undefined) return false
+    try {
+      ws.send(JSON.stringify(payload))
+      return true
+    } catch {
+      return false
+    }
+  }
+  const flushEvents = (): void => {
+    if (flushTimer !== undefined) {
+      clearTimeout(flushTimer)
+      flushTimer = undefined
+    }
+    if (pendingEvents.length === 0) return
+    const batch = pendingEvents.splice(0)
+    if (wsSend({ type: 'events', events: batch })) {
+      markConnected()
+      return
+    }
+    httpSend(batch)
+  }
+  const queueEvent = (payload: unknown): void => {
+    pendingEvents.push(payload)
+    if (flushTimer === undefined) {
+      flushTimer = setTimeout(flushEvents, 150)
+    }
+  }
+  const sendImmediate = (payload: unknown): void => {
+    if (wsSend({ type: 'event', event: payload })) {
+      markConnected()
+      return
+    }
+    httpSend(payload)
+  }
+
+  const wsUrl = (() => {
+    const url = new URL(endpointUrl.origin)
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+    url.pathname = '/v1/ws'
+    url.search = ''
+    url.searchParams.set('source', source)
+    if (authToken !== undefined) url.searchParams.set('token', authToken)
+    return url.toString()
+  })()
+
+  function scheduleReconnect(): void {
+    if (disposed || !useWebSocket) return
+    if (reconnectTimer !== undefined) return
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = undefined
+      connectWs()
+    }, reconnectDelay)
+    reconnectDelay = Math.min(reconnectDelay * 2, 15_000)
+  }
+  function connectWs(): void {
+    if (!useWebSocket || disposed) return
+    try {
+      ws = new WebSocket(wsUrl)
+    } catch (error) {
+      markDisconnected(error)
+      scheduleReconnect()
+      return
+    }
+    ws.onopen = () => {
+      wsReady = true
+      reconnectDelay = 1_000
+      markConnected()
+      flushEvents()
+    }
+    ws.onmessage = (event) => {
+      try {
+        const message = JSON.parse(String(event.data)) as { type?: string; state?: PetSnapshotV1 }
+        if (message.type === 'pong' || message.type === 'ack' || message.type === 'hello') markConnected()
+      } catch {
+        // Ignore malformed WebSocket messages.
+      }
+    }
+    ws.onclose = () => {
+      wsReady = false
+      ws = undefined
+      scheduleReconnect()
+    }
+    ws.onerror = () => {
+      wsReady = false
+      try { ws?.close() } catch { /* noop */ }
+    }
+  }
 
   const sendHeartbeat = (): void => {
+    if (wsSend({ type: 'heartbeat', source, time: Date.now() })) {
+      markConnected()
+      return
+    }
     void postJson(heartbeatUrl.toString(), { source, time: Date.now() })
       .then(markConnected)
       .catch((error: unknown) => {
@@ -90,9 +194,16 @@ export function apply(ctx: Context, config: Config = {}): void {
   const registerEffect: (fn: () => (() => void) | void, label?: string) => unknown =
     (ctx as any).effect ?? (ctx as unknown as { fiber: { effect(fn: () => (() => void) | void, label?: string): unknown } }).fiber.effect
   registerEffect(() => {
+    if (useWebSocket) connectWs()
     const timer = setInterval(sendHeartbeat, heartbeatIntervalMs)
     void sendHeartbeat()
-    return () => clearInterval(timer)
+    return () => {
+      disposed = true
+      clearInterval(timer)
+      if (flushTimer !== undefined) clearTimeout(flushTimer)
+      if (reconnectTimer !== undefined) clearTimeout(reconnectTimer)
+      ws?.close()
+    }
   }, `${name} heartbeat`)
 
   ctx.on('session/event', (session, event) => {
@@ -101,11 +212,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     const usage = usageFrom(event)
     if (usage !== undefined) {
       const data = event.data as { turn?: unknown; step?: unknown }
-      send({ ...base, type: 'usage', mode: 'sample', sampleKey: `${String(data.turn)}:${String(data.step)}`, usage })
+      queueEvent({ ...base, type: 'usage', mode: 'sample', sampleKey: `${String(data.turn)}:${String(data.step)}`, usage })
       return
     }
     const activity = activityFrom(event)
-    if (activity !== undefined) send({ ...base, type: 'activity', activity })
+    if (activity !== undefined) sendImmediate({ ...base, type: 'activity', activity })
   }, { global: true })
 }
 

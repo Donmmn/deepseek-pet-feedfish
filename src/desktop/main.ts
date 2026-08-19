@@ -9,6 +9,7 @@ let runtime: RunningPetServer | undefined
 let petWindow: BrowserWindow | undefined
 let tray: Tray | undefined
 let trayTimer: ReturnType<typeof setInterval> | undefined
+let trayUnsubscribe: (() => void) | undefined
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock()
 if (!hasSingleInstanceLock) {
@@ -56,7 +57,9 @@ async function startDesktop(): Promise<void> {
   petWindow.setAlwaysOnTop(true, 'floating')
   await petWindow.loadURL(`${petUrl}/?desktop=1`)
   setupTray(packageRoot)
-  trayTimer = setInterval(refreshTrayMenu, 5000)
+  refreshTrayMenu()
+  trayUnsubscribe = runtime?.onState(() => refreshTrayMenu())
+  trayTimer = setInterval(refreshTrayMenu, 30_000)
   petWindow.show()
 }
 
@@ -105,6 +108,7 @@ function showStartupError(error: unknown): void {
 
 app.on('before-quit', () => {
   if (trayTimer !== undefined) clearInterval(trayTimer)
+  trayUnsubscribe?.()
   void runtime?.close()
 })
 app.on('window-all-closed', () => {

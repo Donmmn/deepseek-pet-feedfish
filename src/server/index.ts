@@ -4,6 +4,7 @@ import { createReadStream, existsSync, mkdirSync, readFileSync, rmSync, writeFil
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { homedir } from 'node:os'
 import { dirname, extname, join, resolve, sep } from 'node:path'
+import { WebSocketServer, type RawData, type WebSocket } from 'ws'
 import { TokenPetLedger, type LedgerSeed, type PetSnapshotV1 } from '../core/index.js'
 import { scanFoodCatalog, type FoodCatalogV1 } from './food-catalog.js'
 
@@ -51,11 +52,13 @@ export interface RunningPetServer {
   foods: FoodCatalogV1
   info: () => PetServerInfoV1
   discovery: () => PetDiscoveryV1
+  /** Subscribe to state changes. Returns an unsubscribe function. */
+  onState: (listener: (state: PetSnapshotV1) => void) => () => void
   close: () => Promise<void>
 }
 
 export const PET_PROTOCOL_VERSION = 'deepseek-token-pet/protocol@1'
-export const PET_SERVER_VERSION = '0.4.0'
+export const PET_SERVER_VERSION = '0.5.0'
 export const DEFAULT_DISCOVERY_FILE = join(homedir(), '.deepseek-token-pet.json')
 
 const DSH_HEARTBEAT_TIMEOUT_MS = 30_000
@@ -104,9 +107,16 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
   const requireAuth = options.requireAuth ?? false
   const discoveryFile = resolve(options.discoveryFile ?? DEFAULT_DISCOVERY_FILE)
   const clients = new Set<ServerResponse>()
+  const wsClients = new Set<WebSocket>()
+  const stateListeners = new Set<(state: PetSnapshotV1) => void>()
   const broadcast = (state: PetSnapshotV1): void => {
     const payload = `event: state\ndata: ${JSON.stringify(state)}\n\n`
     for (const client of clients) client.write(payload)
+    const wsPayload = JSON.stringify({ type: 'state', state })
+    for (const client of wsClients) {
+      if (client.readyState === client.OPEN) client.send(wsPayload)
+    }
+    for (const listener of stateListeners) listener(state)
   }
   store.on('state', broadcast)
 
@@ -130,7 +140,7 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
           schema: 'deepseek-token-pet/info@1',
           protocolVersion: PET_PROTOCOL_VERSION,
           serverVersion: PET_SERVER_VERSION,
-          capabilities: ['events', 'heartbeat', 'state', 'stream', 'foods', 'bowls', 'discovery'],
+          capabilities: ['events', 'heartbeat', 'state', 'stream', 'foods', 'bowls', 'discovery', 'ws'],
           heartbeatTimeoutMs: DSH_HEARTBEAT_TIMEOUT_MS,
           authRequired: requireAuth,
         })
@@ -192,9 +202,59 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
     schema: 'deepseek-token-pet/info@1',
     protocolVersion: PET_PROTOCOL_VERSION,
     serverVersion: PET_SERVER_VERSION,
-    capabilities: ['events', 'heartbeat', 'state', 'stream', 'foods', 'bowls', 'discovery'],
+    capabilities: ['events', 'heartbeat', 'state', 'stream', 'foods', 'bowls', 'discovery', 'ws'],
     heartbeatTimeoutMs: DSH_HEARTBEAT_TIMEOUT_MS,
     authRequired: requireAuth,
+  })
+  const handleWsMessage = (socket: WebSocket, message: unknown, source: string): void => {
+    if (message === null || typeof message !== 'object') {
+      socket.send(JSON.stringify({ type: 'error', error: 'invalid_message' }))
+      return
+    }
+    const msg = message as Record<string, unknown>
+    if (msg.type === 'heartbeat') {
+      store.markHeartbeat(source)
+      socket.send(JSON.stringify({ type: 'pong', time: Date.now(), state: store.publish() }))
+      return
+    }
+    if (msg.type === 'event' || msg.type === 'events') {
+      const raw = msg.type === 'event' ? msg.event : msg.events
+      const events = Array.isArray(raw) ? raw : raw === undefined ? [] : [raw]
+      const results = events.map(event => store.ledger.ingest(event))
+      const state = store.publish()
+      socket.send(JSON.stringify({ type: 'ack', accepted: results.filter(result => result.accepted).length, state }))
+      return
+    }
+    if (msg.type === 'ping') {
+      socket.send(JSON.stringify({ type: 'pong', time: Date.now() }))
+      return
+    }
+    socket.send(JSON.stringify({ type: 'error', error: 'unknown_message_type' }))
+  }
+  const wss = new WebSocketServer({ server, path: '/v1/ws' })
+  wss.on('connection', (socket, request) => {
+    const requestUrl = new URL(request.url ?? '/', `http://${request.headers.host ?? `${host}:${port}`}`)
+    const source = requestUrl.searchParams.get('source') ?? 'unknown'
+    const token = requestUrl.searchParams.get('token')
+    if (requireAuth && token !== authToken) {
+      socket.close(1008, 'unauthorized')
+      return
+    }
+    wsClients.add(socket)
+    socket.on('message', (data: RawData) => {
+      let message: unknown
+      try {
+        message = JSON.parse(data.toString())
+      } catch {
+        socket.send(JSON.stringify({ type: 'error', error: 'invalid_json' }))
+        return
+      }
+      handleWsMessage(socket, message, source)
+    })
+    socket.on('close', () => wsClients.delete(socket))
+    socket.on('error', () => wsClients.delete(socket))
+    store.markHeartbeat(source)
+    socket.send(JSON.stringify({ type: 'hello', ok: true, info: info(), state: store.snapshot() }))
   })
   const writeDiscovery = (): void => {
     discovery = () => ({
@@ -219,7 +279,13 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
     state: () => store.snapshot(), foods: foodCatalog,
     info,
     discovery: () => discovery(),
+    onState: (listener) => {
+      stateListeners.add(listener)
+      return () => stateListeners.delete(listener)
+    },
     close: () => new Promise<void>((resolveClose, reject) => {
+      for (const client of wsClients) client.close(1001, 'server closing')
+      wss.close()
       server.close(error => {
         if (error !== undefined) { reject(error); return }
         try {
