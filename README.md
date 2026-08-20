@@ -10,6 +10,8 @@
 
 ![DeepSeek Token Pet 桌面演示](assets/qa/desktop-preview.png)
 
+<video src="assets/demo/deepseek-token-pet-demo.mp4" controls width="480"></video>
+
 > 本项目是非官方社区项目，不属于 DeepSeek。公开分发前请自行确认角色形象与商标的使用权限。
 
 ## 直接使用
