@@ -1,3 +1,5 @@
+import type { AppendageMode, LegStyle } from '../server/skin-catalog.js'
+
 export const PET_SETTINGS_STORAGE_KEY = 'deepseek-token-pet/widget-settings@1'
 
 export interface PetFeedSettings {
@@ -17,12 +19,20 @@ export interface PetWidgetSettingsV1 {
   schema: 'deepseek-token-pet/widget-settings@1'
   feed: PetFeedSettings
   initialScalePercent: number
+  appendageMode: AppendageMode
+  legStyle: LegStyle
+  legFootwear: 'barefoot' | 'shoes'
+  activeSkinId: string
   theme: PetThemeSettings
 }
 
 export interface PetWidgetSettingsPatch {
   feed?: Partial<PetFeedSettings>
   initialScalePercent?: number
+  appendageMode?: AppendageMode
+  legStyle?: LegStyle
+  legFootwear?: 'barefoot' | 'shoes'
+  activeSkinId?: string
   theme?: Partial<PetThemeSettings>
 }
 
@@ -30,6 +40,10 @@ export const DEFAULT_WIDGET_SETTINGS: Readonly<PetWidgetSettingsV1> = Object.fre
   schema: 'deepseek-token-pet/widget-settings@1',
   feed: Object.freeze({ offsetX: 0, offsetY: 0, distance: 68 }),
   initialScalePercent: 100,
+  appendageMode: 'tail',
+  legStyle: 'bare',
+  legFootwear: 'shoes',
+  activeSkinId: '',
   theme: Object.freeze({
     buttonBackground: '#16295f',
     buttonBorder: '#79b8ff',
@@ -50,6 +64,10 @@ export function normalizeWidgetSettings(value: unknown): PetWidgetSettingsV1 {
       distance: boundedNumber(feed.distance, 20, 180, DEFAULT_WIDGET_SETTINGS.feed.distance),
     },
     initialScalePercent: boundedNumber(record.initialScalePercent, 60, 200, DEFAULT_WIDGET_SETTINGS.initialScalePercent),
+    appendageMode: record.appendageMode === 'legs' ? 'legs' : 'tail',
+    legStyle: isLegStyle(record.legStyle) ? record.legStyle : DEFAULT_WIDGET_SETTINGS.legStyle,
+    legFootwear: record.legFootwear === 'barefoot' ? 'barefoot' : 'shoes',
+    activeSkinId: typeof record.activeSkinId === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(record.activeSkinId) ? record.activeSkinId : '',
     theme: {
       buttonBackground: color(theme.buttonBackground, DEFAULT_WIDGET_SETTINGS.theme.buttonBackground),
       buttonBorder: color(theme.buttonBorder, DEFAULT_WIDGET_SETTINGS.theme.buttonBorder),
@@ -103,4 +121,8 @@ function color(value: unknown, fallback: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isLegStyle(value: unknown): value is LegStyle {
+  return value === 'bare' || value === 'black-stockings' || value === 'white-stockings'
 }

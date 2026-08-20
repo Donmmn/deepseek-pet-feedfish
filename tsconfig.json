@@ -15,6 +15,5 @@
     "resolveJsonModule": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "tsup.config.ts"]
+  "include": ["src/**/*.ts", "tests/**/*.ts", "pose-editor/**/*.ts", "tsup.config.ts"]
 }
-

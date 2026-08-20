@@ -45,6 +45,8 @@
     "assets/icon.png",
     "assets/icon.ico",
     "assets/foods/",
+    "assets/legs/",
+    "skin/",
     "dist/",
     "client.js",
     "cordis.patch.yml",
@@ -68,6 +70,7 @@
     "pack:check": "pnpm build && pnpm pack --pack-destination release",
     "desktop": "pnpm build && electron dist/desktop/main.js",
     "desktop:pack": "pnpm build && electron-builder --dir",
+    "pose:edit": "tsx pose-editor/pose-editor-server.ts",
     "prepare": "pnpm build"
   },
   "peerDependencies": {
@@ -112,6 +115,8 @@
       "assets/tray-icon.png",
       "assets/tray-icon@2x.png",
       "assets/foods/**/*",
+      "assets/legs/**/*",
+      "skin/**/*",
       "package.json"
     ],
     "win": {

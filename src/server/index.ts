@@ -7,8 +7,10 @@ import { dirname, extname, join, resolve, sep } from 'node:path'
 import { WebSocketServer, type RawData, type WebSocket } from 'ws'
 import { TokenPetLedger, type LedgerSeed, type PetSnapshotV1 } from '../core/index.js'
 import { scanFoodCatalog, type FoodCatalogV1 } from './food-catalog.js'
+import { ensureSkinRoot, installSkinPackage, resolveInstalledSkinAsset, scanSkinCatalog, type SkinCatalogV1 } from './skin-catalog.js'
 
 export * from './food-catalog.js'
+export * from './skin-catalog.js'
 
 export interface PetServerOptions {
   host?: string
@@ -21,6 +23,8 @@ export interface PetServerOptions {
   requireAuth?: boolean
   /** Where to publish endpoint discovery metadata. Defaults to ~/.deepseek-token-pet.json */
   discoveryFile?: string
+  /** Root directory for installed leg/skin packages. */
+  skinRoot?: string
 }
 
 export interface PetDiscoveryV1 {
@@ -54,6 +58,7 @@ export interface RunningPetServer {
   discovery: () => PetDiscoveryV1
   /** Subscribe to state changes. Returns an unsubscribe function. */
   onState: (listener: (state: PetSnapshotV1) => void) => () => void
+  skins: () => SkinCatalogV1
   close: () => Promise<void>
 }
 
@@ -101,6 +106,8 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
   const port = options.port ?? 47832
   const packageRoot = resolve(options.packageRoot ?? process.cwd())
   const assetRoot = resolve(packageRoot, 'assets')
+  const skinRoot = resolve(options.skinRoot ?? resolve(packageRoot, 'skin'))
+  ensureSkinRoot(skinRoot)
   const foodCatalog = scanFoodCatalog(resolve(assetRoot, 'foods'))
   const store = new PetStore(options.stateFile)
   const authToken = options.authToken ?? randomBytes(24).toString('hex')
@@ -148,6 +155,7 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
       if (request.method === 'GET' && url.pathname === '/v1/state') return json(response, 200, store.snapshot())
       if (request.method === 'GET' && url.pathname === '/v1/foods') return json(response, 200, foodCatalog)
       if (request.method === 'GET' && url.pathname === '/v1/discovery') return json(response, 200, discovery())
+      if (request.method === 'GET' && url.pathname === '/v1/skins') return json(response, 200, scanSkinCatalog(skinRoot))
       if (request.method === 'GET' && url.pathname === '/v1/stream') {
         response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' })
         clients.add(response)
@@ -172,6 +180,12 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
         const state = store.publish()
         return json(response, 202, { accepted: results.filter(result => result.accepted).length, state })
       }
+      if (request.method === 'POST' && url.pathname === '/v1/skins/install') {
+        const body = await readJson(request)
+        if (!isRecord(body) || typeof body.file !== 'string') return json(response, 400, { error: 'skin_package_file_required' })
+        const installed = installSkinPackage(skinRoot, body.file)
+        return json(response, 201, { installed, catalog: scanSkinCatalog(skinRoot) })
+      }
       const ack = request.method === 'POST' ? /^\/v1\/bowls\/(\d+)\/ack$/.exec(url.pathname) : null
       if (ack !== null) {
         if (!writeGuard(request, response)) return
@@ -184,6 +198,14 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
         const assetPath = resolve(packageRoot, `.${decodeURIComponent(url.pathname)}`)
         if (assetPath !== assetRoot && !assetPath.startsWith(`${assetRoot}${sep}`)) return json(response, 403, { error: 'asset_path_forbidden' })
         return file(response, assetPath)
+      }
+      const skinAsset = request.method === 'GET' ? /^\/skin-assets\/([^/]+)\/(.+)$/.exec(url.pathname) : null
+      if (skinAsset !== null) {
+        const skinId = decodeURIComponent(skinAsset[1] as string)
+        const assetPath = decodeURIComponent(skinAsset[2] as string)
+        const installedAsset = resolveInstalledSkinAsset(skinRoot, skinId, assetPath)
+        if (installedAsset === undefined) return json(response, 404, { error: 'skin_asset_not_found' })
+        return file(response, installedAsset)
       }
       return json(response, 404, { error: 'not_found' })
     } catch (error) {
@@ -283,6 +305,7 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
       stateListeners.add(listener)
       return () => stateListeners.delete(listener)
     },
+    skins: () => scanSkinCatalog(skinRoot),
     close: () => new Promise<void>((resolveClose, reject) => {
       for (const client of wsClients) client.close(1001, 'server closing')
       wss.close()
@@ -325,9 +348,11 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
 function file(response: ServerResponse, path: string): void {
   if (!existsSync(path)) { json(response, 404, { error: 'asset_not_found' }); return }
   const extension = extname(path)
-  const contentType = ({ '.js': 'text/javascript', '.png': 'image/png', '.json': 'application/json' } as Record<string, string>)[extension] ?? 'application/octet-stream'
-  const cacheControl = extension === '.js' || extension === '.png' ? 'no-cache, no-store, must-revalidate' : 'public, max-age=3600'
+  const contentType = ({ '.js': 'text/javascript', '.png': 'image/png', '.svg': 'image/svg+xml', '.json': 'application/json' } as Record<string, string>)[extension] ?? 'application/octet-stream'
+  const cacheControl = extension === '.js' || extension === '.png' || extension === '.svg' ? 'no-cache, no-store, must-revalidate' : 'public, max-age=3600'
   response.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': cacheControl })
   createReadStream(path).pipe(response)
 }
 function demoHtml(): string { return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>DeepSeek Token Pet</title><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}body{display:grid;place-items:center;-webkit-app-region:drag}</style></head><body><deepseek-token-pet endpoint="" asset-base="/assets"></deepseek-token-pet><script type="module">import '/widget.js?v=0.2.4';const pet=document.querySelector('deepseek-token-pet');pet.setAttribute('endpoint',location.origin);if(new URLSearchParams(location.search).has('desktop'))pet.addEventListener('pet-resize',event=>window.resizeTo(event.detail.width,event.detail.height));</script></body></html>` }
+
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) }
