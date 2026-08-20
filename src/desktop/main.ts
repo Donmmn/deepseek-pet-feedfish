@@ -30,8 +30,9 @@ if (!hasSingleInstanceLock) {
 
 async function startDesktop(): Promise<void> {
   const packageRoot = fileURLToPath(new URL('../../', import.meta.url))
-  const writableRoot = process.env.PORTABLE_EXECUTABLE_DIR ?? packageRoot
-  const skinRoot = join(writableRoot, 'skin')
+  const skinRoot = process.env.PORTABLE_EXECUTABLE_DIR
+    ? join(process.env.PORTABLE_EXECUTABLE_DIR, 'skin')
+    : join(app.getPath('userData'), 'skin')
   let petUrl = 'http://127.0.0.1:47832'
   try {
     runtime = await createPetServer({ host: '127.0.0.1', port: 47832, stateFile: join(homedir(), '.deepseek-token-pet-state.json'), packageRoot, skinRoot })
