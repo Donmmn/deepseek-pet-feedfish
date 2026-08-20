@@ -7,6 +7,8 @@ import { createPetServer, type RunningPetServer } from '../server/index.js'
 let runtime: RunningPetServer | undefined
 let petWindow: BrowserWindow | undefined
 let tray: Tray | undefined
+let trayTimer: ReturnType<typeof setInterval> | undefined
+let trayUnsubscribe: (() => void) | undefined
 let quitting = false
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock()
@@ -28,17 +30,24 @@ if (!hasSingleInstanceLock) {
 
 async function startDesktop(): Promise<void> {
   const packageRoot = fileURLToPath(new URL('../../', import.meta.url))
+  const skinRoot = process.env.PORTABLE_EXECUTABLE_DIR
+    ? join(process.env.PORTABLE_EXECUTABLE_DIR, 'skin')
+    : join(app.getPath('userData'), 'skin')
   let petUrl = 'http://127.0.0.1:47832'
   try {
-    runtime = await createPetServer({ host: '127.0.0.1', port: 47832, stateFile: join(homedir(), '.deepseek-token-pet-state.json'), packageRoot })
+    runtime = await createPetServer({ host: '127.0.0.1', port: 47832, stateFile: join(homedir(), '.deepseek-token-pet-state.json'), packageRoot, skinRoot })
     petUrl = runtime.url
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw error
   }
 
+  // macOS menu bar app: hide from Dock and stay alive in the status bar.
+  app.dock?.hide()
+
   const initialWidth = 440
-  const initialHeight = 290
+  const initialHeight = 370
   const workArea = screen.getPrimaryDisplay().workArea
+
   petWindow = new BrowserWindow({
     x: workArea.x + workArea.width - initialWidth - 16,
     y: workArea.y + workArea.height - initialHeight - 16,
@@ -63,7 +72,24 @@ async function startDesktop(): Promise<void> {
   })
   await petWindow.loadURL(`${petUrl}/?desktop=1`)
   createTray(packageRoot)
+  refreshTrayMenu()
+  trayUnsubscribe = runtime?.onState(() => refreshTrayMenu())
+  trayTimer = setInterval(refreshTrayMenu, 30_000)
   petWindow.show()
+}
+
+function toggleWindow(): void {
+  if (petWindow === undefined) return
+  if (petWindow.isVisible()) {
+    petWindow.hide()
+  } else {
+    petWindow.show()
+    petWindow.focus()
+  }
+}
+
+function trayStatusLabel(): string {
+  return runtime?.state().dshConnected === true ? 'DSH 插件：已连接' : 'DSH 插件：未连接'
 }
 
 function createTray(packageRoot: string): void {
@@ -72,21 +98,19 @@ function createTray(packageRoot: string): void {
   if (icon.isEmpty()) icon = nativeImage.createFromPath(process.execPath)
   tray = new Tray(icon)
   tray.setToolTip('DeepSeek Token Pet')
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: '显示 / 隐藏桌宠', click: togglePetWindow },
-    { type: 'separator' },
-    { label: '退出', click: quitFromTray },
-  ]))
-  tray.on('click', togglePetWindow)
+  tray.on('click', toggleWindow)
 }
 
-function togglePetWindow(): void {
-  if (petWindow === undefined) return
-  if (petWindow.isVisible()) petWindow.hide()
-  else {
-    petWindow.show()
-    petWindow.focus()
-  }
+function refreshTrayMenu(): void {
+  if (tray === undefined) return
+  tray.setToolTip(`DeepSeek Token Pet — ${trayStatusLabel()}`)
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: trayStatusLabel(), enabled: false },
+    { type: 'separator' },
+    { label: '显示/隐藏桌宠', click: toggleWindow },
+    { type: 'separator' },
+    { label: '退出 DeepSeek Token Pet', click: quitFromTray },
+  ]))
 }
 
 function quitFromTray(): void {
@@ -102,8 +126,12 @@ function showStartupError(error: unknown): void {
 
 app.on('before-quit', () => {
   quitting = true
+  if (trayTimer !== undefined) clearInterval(trayTimer)
+  trayUnsubscribe?.()
   tray?.destroy()
   tray = undefined
   void runtime?.close()
 })
-app.on('window-all-closed', () => { /* The tray owns the application lifetime. */ })
+app.on('window-all-closed', () => {
+  // The tray owns the application lifetime.
+})

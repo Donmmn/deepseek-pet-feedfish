@@ -1,40 +1,282 @@
+import { existsSync, readFileSync } from 'node:fs'
+import { request } from 'node:http'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { PET_EVENT_SCHEMA, type TokenUsageBreakdown } from '../core/index.js'
+import WebSocket from 'ws'
+import { PET_EVENT_SCHEMA, type PetSnapshotV1, type TokenUsageBreakdown } from '../core/index.js'
 
 export const name = 'deepseek-token-pet'
 export const inject = ['sessions']
 
-export interface Config { endpoint?: string; source?: string }
+export interface Config {
+  endpoint?: string
+  source?: string
+  /** Heartbeat interval in milliseconds. */
+  heartbeatIntervalMs?: number
+  /** How long a pet may stay silent before the plugin reports it disconnected. */
+  heartbeatTimeoutMs?: number
+  /** Path to the pet discovery file. Defaults to ~/.deepseek-token-pet.json */
+  discoveryFile?: string
+  /** Use a persistent WebSocket when the pet server supports it. Defaults to true. */
+  useWebSocket?: boolean
+}
+
+export interface PetConnectionStatus {
+  connected: boolean
+  endpoint: string
+  source: string
+  lastSeenAt?: number
+  lastError: string | undefined
+}
+
 export function apply(ctx: Context, config: Config = {}): void {
-  const endpoint = (config.endpoint ?? 'http://127.0.0.1:47832/v1/events').replace(/\/$/, '')
+  ensureLocalhostBypassesProxy()
+  const discovered = readDiscovery(config.discoveryFile)
+  const endpoint = (config.endpoint ?? (discovered?.url === undefined ? 'http://127.0.0.1:47832/v1/events' : `${discovered.url}/v1/events`)).replace(/\/$/, '')
+  const authToken = discovered?.authToken
   const source = config.source ?? 'deepseek-harness'
-  let chain = Promise.resolve()
+  const heartbeatIntervalMs = config.heartbeatIntervalMs ?? 10_000
+  const useWebSocket = config.useWebSocket ?? true
+
+  const endpointUrl = new URL(endpoint)
+  const heartbeatUrl = new URL(endpointUrl.origin)
+  heartbeatUrl.pathname = '/v1/heartbeat'
+  heartbeatUrl.search = ''
+  const stateUrl = new URL(endpointUrl.origin)
+  stateUrl.pathname = '/v1/state'
+  stateUrl.search = ''
+
+  const status: PetConnectionStatus = { connected: false, endpoint, source, lastError: undefined }
   let warned = false
-  const send = (payload: unknown): void => {
+  let chain = Promise.resolve()
+  let ws: WebSocket | undefined
+  let wsReady = false
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined
+  let reconnectDelay = 1_000
+  let disposed = false
+  let pendingEvents: unknown[] = []
+  let flushTimer: ReturnType<typeof setTimeout> | undefined
+
+  const markConnected = (): void => {
+    if (!status.connected) ctx.logger?.(name).info(`desktop pet connected: ${endpoint}`)
+    status.connected = true
+    status.lastError = undefined
+    status.lastSeenAt = Date.now()
+    warned = false
+  }
+  const markDisconnected = (error: unknown): void => {
+    if (!status.connected || !warned) ctx.logger?.(name).warn(`desktop pet unavailable: ${String(error)}`)
+    status.connected = false
+    status.lastError = String(error)
+    warned = true
+  }
+  const postJson = (url: string, payload: unknown): Promise<unknown> => {
+    return httpJson('POST', url, payload, 2500, authToken)
+  }
+  const httpSend = (payload: unknown): void => {
     chain = chain.then(async () => {
       try {
-        const response = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), signal: AbortSignal.timeout(2500) })
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
-        warned = false
+        await postJson(endpoint, payload)
+        markConnected()
       } catch (error) {
-        if (!warned) ctx.logger?.(name).warn(`desktop pet endpoint unavailable: ${String(error)}`)
-        warned = true
+        markDisconnected(error)
       }
     })
   }
+  const wsSend = (payload: unknown): boolean => {
+    if (!wsReady || ws === undefined) return false
+    try {
+      ws.send(JSON.stringify(payload))
+      return true
+    } catch {
+      return false
+    }
+  }
+  const flushEvents = (): void => {
+    if (flushTimer !== undefined) {
+      clearTimeout(flushTimer)
+      flushTimer = undefined
+    }
+    if (pendingEvents.length === 0) return
+    const batch = pendingEvents.splice(0)
+    if (wsSend({ type: 'events', events: batch })) {
+      markConnected()
+      return
+    }
+    httpSend(batch)
+  }
+  const queueEvent = (payload: unknown): void => {
+    pendingEvents.push(payload)
+    if (flushTimer === undefined) {
+      flushTimer = setTimeout(flushEvents, 150)
+    }
+  }
+  const sendImmediate = (payload: unknown): void => {
+    if (wsSend({ type: 'event', event: payload })) {
+      markConnected()
+      return
+    }
+    httpSend(payload)
+  }
+
+  const wsUrl = (() => {
+    const url = new URL(endpointUrl.origin)
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+    url.pathname = '/v1/ws'
+    url.search = ''
+    url.searchParams.set('source', source)
+    if (authToken !== undefined) url.searchParams.set('token', authToken)
+    return url.toString()
+  })()
+
+  function scheduleReconnect(): void {
+    if (disposed || !useWebSocket) return
+    if (reconnectTimer !== undefined) return
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = undefined
+      connectWs()
+    }, reconnectDelay)
+    reconnectDelay = Math.min(reconnectDelay * 2, 15_000)
+  }
+  function connectWs(): void {
+    if (!useWebSocket || disposed) return
+    try {
+      ws = new WebSocket(wsUrl)
+    } catch (error) {
+      markDisconnected(error)
+      scheduleReconnect()
+      return
+    }
+    ws.onopen = () => {
+      wsReady = true
+      reconnectDelay = 1_000
+      markConnected()
+      flushEvents()
+    }
+    ws.onmessage = (event) => {
+      try {
+        const message = JSON.parse(String(event.data)) as { type?: string; state?: PetSnapshotV1 }
+        if (message.type === 'pong' || message.type === 'ack' || message.type === 'hello') markConnected()
+      } catch {
+        // Ignore malformed WebSocket messages.
+      }
+    }
+    ws.onclose = () => {
+      wsReady = false
+      ws = undefined
+      scheduleReconnect()
+    }
+    ws.onerror = () => {
+      wsReady = false
+      try { ws?.close() } catch { /* noop */ }
+    }
+  }
+
+  const sendHeartbeat = (): void => {
+    if (wsSend({ type: 'heartbeat', source, time: Date.now() })) {
+      markConnected()
+      return
+    }
+    void postJson(heartbeatUrl.toString(), { source, time: Date.now() })
+      .then(markConnected)
+      .catch((error: unknown) => {
+        // Older pet builds may not implement /v1/heartbeat yet; fall back to
+        // the state endpoint so the plugin still reports a valid connection.
+        void httpJson('GET', stateUrl.toString(), undefined, 2500, authToken)
+          .then(markConnected)
+          .catch(() => markDisconnected(error))
+      })
+  }
+
+  // Keep the pet's connection status live even when no token event is flowing.
+  const registerEffect: (fn: () => (() => void) | void, label?: string) => unknown =
+    (ctx as any).effect ?? (ctx as unknown as { fiber: { effect(fn: () => (() => void) | void, label?: string): unknown } }).fiber.effect
+  registerEffect(() => {
+    if (useWebSocket) connectWs()
+    const timer = setInterval(sendHeartbeat, heartbeatIntervalMs)
+    void sendHeartbeat()
+    return () => {
+      disposed = true
+      clearInterval(timer)
+      if (flushTimer !== undefined) clearTimeout(flushTimer)
+      if (reconnectTimer !== undefined) clearTimeout(reconnectTimer)
+      ws?.close()
+    }
+  }, `${name} heartbeat`)
+
   ctx.on('session/event', (session, event) => {
     const sessionId = String(session.id ?? session.header?.id ?? 'unknown')
     const base = { schema: PET_EVENT_SCHEMA, source, sessionId, timestamp: event.time, id: `${source}:${sessionId}:${event.seq}` }
     const usage = usageFrom(event)
     if (usage !== undefined) {
       const data = event.data as { turn?: unknown; step?: unknown }
-      send({ ...base, type: 'usage', mode: 'sample', sampleKey: `${String(data.turn)}:${String(data.step)}`, usage })
+      queueEvent({ ...base, type: 'usage', mode: 'sample', sampleKey: `${String(data.turn)}:${String(data.step)}`, usage })
       return
     }
     const activity = activityFrom(event)
-    if (activity !== undefined) send({ ...base, type: 'activity', activity })
+    if (activity !== undefined) sendImmediate({ ...base, type: 'activity', activity })
   }, { global: true })
+}
+
+function ensureLocalhostBypassesProxy(): void {
+  // Node.js with NODE_USE_ENV_PROXY routes even http.request through the
+  // configured proxy. Local pet traffic must never go through the proxy.
+  const existing = process.env.NO_PROXY ?? process.env.no_proxy ?? ''
+  const entries = existing.split(',').map((item) => item.trim()).filter(Boolean)
+  for (const host of ['127.0.0.1', 'localhost', '::1']) {
+    if (!entries.includes(host)) entries.push(host)
+  }
+  process.env.NO_PROXY = entries.join(',')
+  process.env.no_proxy = process.env.NO_PROXY
+}
+
+function readDiscovery(discoveryFile?: string): { url?: string; authToken?: string } | undefined {
+  const file = discoveryFile ?? join(homedir(), '.deepseek-token-pet.json')
+  try {
+    if (!existsSync(file)) return undefined
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as { url?: unknown; authToken?: unknown }
+    const result: { url?: string; authToken?: string } = {}
+    if (typeof parsed.url === 'string') result.url = parsed.url
+    if (typeof parsed.authToken === 'string') result.authToken = parsed.authToken
+    return result
+  } catch {
+    return undefined
+  }
+}
+
+function httpJson(method: 'GET' | 'POST', url: string, payload?: unknown, timeoutMs = 2500, authToken?: string): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    let body: string | undefined
+    const headers: Record<string, string> = {}
+    if (authToken !== undefined) headers.authorization = `Bearer ${authToken}`
+    if (payload !== undefined) {
+      body = JSON.stringify(payload)
+      headers['content-type'] = 'application/json'
+      headers['content-length'] = String(Buffer.byteLength(body))
+    }
+    const req = request(url, { method, headers, timeout: timeoutMs, agent: false }, (response) => {
+      const chunks: Buffer[] = []
+      response.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)))
+      response.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8')
+        if (response.statusCode === undefined || response.statusCode < 200 || response.statusCode >= 300) {
+          reject(new Error(`HTTP ${response.statusCode ?? 'unknown'}`))
+          return
+        }
+        try {
+          resolve(text.length === 0 ? undefined : JSON.parse(text) as unknown)
+        } catch {
+          resolve(text)
+        }
+      })
+    })
+    req.on('timeout', () => req.destroy(new Error('timeout')))
+    req.on('error', reject)
+    if (body !== undefined) req.write(body)
+    req.end()
+  })
 }
 
 function usageFrom(event: SessionEvent): TokenUsageBreakdown | undefined {

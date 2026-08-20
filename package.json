@@ -1,6 +1,6 @@
 {
   "name": "deepseek-token-pet",
-  "version": "0.2.4",
+  "version": "0.5.0",
   "description": "Portable token-driven pixel desktop pet with a DeepSeek Harness adapter",
   "author": "DeepSeek Token Pet contributors",
   "type": "module",
@@ -32,6 +32,7 @@
       "types": "./dist/dsh/index.d.ts",
       "default": "./dist/dsh/index.js"
     },
+    "./client": "./client.js",
     "./assets/*": "./assets/*"
   },
   "bin": {
@@ -44,12 +45,19 @@
     "assets/icon.png",
     "assets/icon.ico",
     "assets/foods/",
+    "assets/legs/",
+    "skin/",
     "dist/",
+    "client.js",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
   ],
   "dsh": {
+    "client": {
+      "inject": [],
+      "platform": "web"
+    },
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
@@ -62,6 +70,7 @@
     "pack:check": "pnpm build && pnpm pack --pack-destination release",
     "desktop": "pnpm build && electron dist/desktop/main.js",
     "desktop:pack": "pnpm build && electron-builder --dir",
+    "pose:edit": "tsx pose-editor/pose-editor-server.ts",
     "prepare": "pnpm build"
   },
   "peerDependencies": {
@@ -69,11 +78,16 @@
     "@deepseek-ai/dsh-session": ">=0.1.0-rc.5"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/cordis": { "optional": true },
-    "@deepseek-ai/dsh-session": { "optional": true }
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-session": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
+    "@types/ws": "^8.18.1",
     "electron": "^37.2.6",
     "electron-builder": "^26.0.12",
     "jsdom": "^26.1.0",
@@ -88,10 +102,42 @@
   "build": {
     "appId": "dev.deepseek.tokenpet",
     "productName": "DeepSeek Token Pet",
-    "directories": { "output": "release/desktop" },
-    "files": ["dist/**/*", "assets/character-body.png", "assets/character-face-idle.png", "assets/character-face-feed.png", "assets/icon.png", "assets/icon.ico", "assets/foods/**/*", "package.json"],
-    "win": { "target": "portable", "icon": "assets/icon.ico" },
-    "mac": { "target": "dmg" },
-    "linux": { "target": "AppImage" }
+    "directories": {
+      "output": "release/desktop"
+    },
+    "files": [
+      "dist/**/*",
+      "assets/character-body.png",
+      "assets/character-face-idle.png",
+      "assets/character-face-feed.png",
+      "assets/icon.png",
+      "assets/icon.ico",
+      "assets/tray-icon.png",
+      "assets/tray-icon@2x.png",
+      "assets/foods/**/*",
+      "assets/legs/**/*",
+      "skin/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "portable",
+      "icon": "assets/icon.ico"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "assets/icon-1024.png",
+      "extendInfo": {
+        "LSUIElement": true
+      }
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
   }
 }

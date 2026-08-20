@@ -2,6 +2,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DeepseekTokenPetElement } from '../src/widget/index.js'
 
+// Node 26's built-in localStorage is gated behind --localstorage-file and is
+// undefined under the jsdom environment; polyfill it for widget persistence tests.
+const storage = new Map<string, string>()
+const localStorageMock: Storage = {
+  getItem: key => storage.get(key) ?? null,
+  setItem: (key, value) => { storage.set(key, String(value)) },
+  removeItem: key => { storage.delete(key) },
+  clear: () => { storage.clear() },
+  key: index => Array.from(storage.keys())[index] ?? null,
+  get length() { return storage.size },
+}
+Object.defineProperty(globalThis, 'localStorage', { value: localStorageMock, configurable: true })
+
 describe('web component', () => {
   afterEach(() => {
     document.body.replaceChildren()
@@ -24,7 +37,7 @@ describe('web component', () => {
     expect(tail.dataset.joints).toBe('6')
     expect(tail.dataset.resample).toBe('2.667')
     expect(Number(tail.dataset.durationMs)).toBeLessThan(3_200)
-    expect((element.shadowRoot?.querySelector('.character-body') as HTMLElement).style.backgroundImage).toContain('character-body.png?v=20260817-v5')
+    expect((element.shadowRoot?.querySelector('.character-body') as HTMLElement).style.backgroundImage).toContain('character-body.png?v=20260819-v9')
   })
 
   it('plays a manual feeding animation without changing token state', async () => {
@@ -37,7 +50,7 @@ describe('web component', () => {
     element.shadowRoot?.querySelector<HTMLButtonElement>('.manual-feed')?.click()
 
     expect(element.shadowRoot?.querySelector('.bowl.eating')).not.toBeNull()
-    expect((element.shadowRoot?.querySelector('.bowl.eating') as HTMLElement).style.backgroundImage).toContain('?v=20260817-v5')
+    expect((element.shadowRoot?.querySelector('.bowl.eating') as HTMLElement).style.backgroundImage).toContain('?v=20260819-v9')
     expect(element.shadowRoot?.querySelector('style')?.textContent).toContain('translate(var(--food-distance),0)')
     expect(element.style.getPropertyValue('--food-distance')).toBe('68px')
     expect((element.shadowRoot?.querySelector('.character-face') as HTMLElement).style.backgroundImage).toContain('character-face-feed.png')
@@ -63,7 +76,7 @@ describe('web component', () => {
     element.setScale(1.5)
 
     expect(element.style.width).toBe('660px')
-    expect(element.style.height).toBe('435px')
+    expect(element.style.height).toBe('555px')
     expect(element.getAttribute('scale')).toBe('1.500')
     expect(resized).toHaveBeenCalledOnce()
     expect(element.shadowRoot?.querySelector('.resize-handle')).not.toBeNull()
@@ -77,7 +90,7 @@ describe('web component', () => {
     }
     internals.resizeStart = { x: 100, y: 100, scale: 1.5 }
     internals.resizeFromPointer({ clientX: 144, clientY: 129 } as PointerEvent)
-    expect(element.getAttribute('scale')).toBe('1.600')
+    expect(element.getAttribute('scale')).toBe('1.591')
   })
 
   it('persists settings, previews the mouth target, and reloads food motion dynamically', () => {
@@ -119,6 +132,39 @@ describe('web component', () => {
     expect(saved.feed).toMatchObject({ offsetX: 12, distance: 92 })
   })
 
+  it('switches between the six-joint tail and alternating two-bone-per-leg animation', () => {
+    const element = new DeepseekTokenPetElement()
+    document.body.append(element)
+    const tail = element.shadowRoot?.querySelector<HTMLCanvasElement>('.tail-canvas') as HTMLCanvasElement
+    const legs = element.shadowRoot?.querySelector<HTMLCanvasElement>('.legs-canvas') as HTMLCanvasElement
+    const legOption = element.shadowRoot?.querySelector<HTMLOptionElement>('#appendage-mode option[value="legs"]') as HTMLOptionElement
+    const legSettings = [...(element.shadowRoot?.querySelectorAll<HTMLElement>('[data-leg-setting]') ?? [])]
+
+    expect(tail.hidden).toBe(false)
+    expect(legs.hidden).toBe(true)
+    expect(legOption.textContent).toBe('腿')
+    expect(legSettings).toHaveLength(2)
+    expect(legSettings.every(row => row.hidden)).toBe(true)
+    expect(legs.dataset.bonesPerLeg).toBe('2')
+    expect(legs.dataset.staticPose).toBe('false')
+    expect(legs.dataset.animation).toBe('alternating')
+
+    element.updateSettings({ appendageMode: 'legs', legStyle: 'black-stockings', legFootwear: 'barefoot' })
+
+    expect(tail.hidden).toBe(true)
+    expect(legs.hidden).toBe(false)
+    expect(legSettings.every(row => !row.hidden)).toBe(true)
+    expect(legs.dataset.legStyle).toBe('black-stockings')
+    expect(legs.dataset.footwear).toBe('barefoot')
+    expect(element.settings.appendageMode).toBe('legs')
+    expect(element.settings.legStyle).toBe('black-stockings')
+    expect(element.settings.legFootwear).toBe('barefoot')
+
+    expect(element.shadowRoot?.querySelector('style')?.textContent).toContain('scrollbar-color:var(--progress-fill) var(--button-bg)')
+    expect(element.shadowRoot?.querySelector('style')?.textContent).toContain('.settings-panel::-webkit-scrollbar-thumb')
+
+  })
+
   it('applies the persisted startup scale and can restore the verified defaults', () => {
     const first = new DeepseekTokenPetElement()
     document.body.append(first)
@@ -128,7 +174,7 @@ describe('web component', () => {
       theme: { buttonBackground: '#112233', buttonBorder: '#abcdef', buttonText: '#fedcba', progressFill: '#123456' },
     })
     expect(first.style.width).toBe('550px')
-    expect(first.style.height).toBe('363px')
+    expect(first.style.height).toBe('463px')
     first.remove()
 
     const second = new DeepseekTokenPetElement()
@@ -140,6 +186,9 @@ describe('web component', () => {
     second.shadowRoot?.querySelector<HTMLButtonElement>('.reset-settings')?.click()
     expect(second.settings.feed).toEqual({ offsetX: 0, offsetY: 0, distance: 68 })
     expect(second.settings.initialScalePercent).toBe(100)
+    expect(second.settings.appendageMode).toBe('tail')
+    expect(second.settings.legStyle).toBe('bare')
+    expect(second.settings.legFootwear).toBe('shoes')
     expect(second.settings.theme).toEqual({
       buttonBackground: '#16295f',
       buttonBorder: '#79b8ff',

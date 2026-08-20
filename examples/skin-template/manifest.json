@@ -1,0 +1,14 @@
+{
+  "schema": "deepseek-token-pet/skin@1",
+  "id": "example-legs",
+  "name": "示例腿部皮肤",
+  "version": "1.0.0",
+  "appendageMode": "legs",
+  "legStyle": "bare",
+  "assets": {
+    "thigh": "assets/thigh.svg",
+    "calf": "assets/calf.svg",
+    "foot": "assets/foot.png",
+    "shoe": "assets/shoe.png"
+  }
+}

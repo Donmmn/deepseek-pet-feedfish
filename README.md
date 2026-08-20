@@ -17,7 +17,7 @@
 如果拿到已经打包的 Windows 便携版，可以直接运行：
 
 ```text
-DeepSeek Token Pet 0.2.4.exe
+DeepSeek Token Pet 0.2.6.exe
 ```
 
 首次启动后，桌宠会同时在本机启动 `http://127.0.0.1:47832`。进度条左侧的齿轮按钮可以打开设置，右下角按钮可以拖动缩放；“喂饭”按钮只预览一次动画，不增加 token 或食物数量。桌面版不显示任务栏图标，只驻留在系统托盘：左键单击托盘图标可显示或隐藏桌宠，右键菜单可退出软件。
@@ -55,9 +55,33 @@ pnpm desktop
 
 - 投喂消失点的 X/Y 偏移，以及食物直线飞行距离；设置面板打开时，红色十字会标出食物消失位置，虚线会标出完整飞行距离；
 - 启动时的初始尺寸，范围为 `60%–200%`；
+- 鲸尾/腿形态、光腿/黑丝/白丝样式、光脚/穿鞋，以及已安装的模块化皮肤；
 - 按钮背景色、边框色、字体色和进度条填充色。
 
 修改会立即生效并保存到浏览器本地存储 `deepseek-token-pet/widget-settings@1`。桌面版使用固定的本地地址和 Electron 用户数据目录，因此重启后仍会保留。点击“恢复默认”会恢复当前验证过的默认值：消失点偏移 `(0, 0)`、飞行距离 `68px`、初始尺寸 `100%` 及默认蓝色主题。
+
+## 模块化皮肤
+
+便携版 EXE 同目录下的 `skin/` 是外部皮肤目录。把皮肤 ZIP 放进去后，在设置的“模块化皮肤”中重新扫描、选择 ZIP 并安装。程序只修改 `skin/installed/` 中的替换素材，绝不会覆盖内置默认素材；加载时也会逐项回退，例如皮肤只替换身体而没有腿部 SVG，腿仍使用当前内置样式。
+
+ZIP 根目录需有 `manifest.json`，结构说明和完整示例见 [`skin/README.md`](skin/README.md)。接口也可由宿主调用：
+
+```text
+GET  /v1/skins
+POST /v1/skins/install   { "file": "relative/path/to/skin.zip" }
+```
+
+双腿模式的大腿和小腿使用平滑 SVG，脚掌与鞋面使用 `48×28` 的紧凑透明 PNG；运行时会统一重采样到 `135×96` Canvas，再按像素风格放大。脚掌 PNG 在踝关节处直接截断，不包含小腿部分，并使用完全透明/完全不透明的二值 Alpha，远端腿的景深透明度不会影响脚掌与鞋面。三款内置腿型共用同一骨骼，脚掌分别提供光腿、黑丝和白丝材质；鞋子是独立 PNG 覆盖层，可在“光脚 / 穿鞋”之间切换，因此丝袜会自然延伸到鞋内。
+
+### 骨骼姿势编辑器
+
+姿势编辑器是仓库内的独立制作工具，不会集成进桌宠服务或 EXE。它不读写 token 状态，也不会成为最终用户界面。双击：
+
+```text
+pose-editor/start-pose-editor.cmd
+```
+
+或在仓库目录运行 `pnpm pose:edit`，浏览器会打开 `http://127.0.0.1:47833/`。编辑器源码和使用说明统一放在 [`pose-editor/`](pose-editor/README.md)，不会进入 npm 包或桌面 EXE。编辑器会用与桌宠相同的 `135×96` Canvas、身体、裙摆和 SVG 腿进行预览。可以拖动前后腿的髋、膝、踝和脚尖控制点，也可直接输入根部坐标、三级角度、缩放及透明度；拖动时只会临时定格，松开后继续播放，不会关闭“播放原动画”。编辑器也能切换光脚或鞋子覆盖层。“播放原动画”用于在当前姿势上测试原有的小腿/脚摆动。配置会保存在独立工具站点的本地存储 `deepseek-token-pet/pose-editor@3`，点击“复制 JSON”即可产出可靠的动画参考配置。
 
 ## 导入食物素材
 
@@ -181,11 +205,15 @@ python examples/python_client.py
 
 ```powershell
 node dist/cli.js serve
-dsh plugin --profile web add ./release/deepseek-token-pet-0.2.4.tgz
+dsh plugin --profile web add ./release/deepseek-token-pet-0.5.0.tgz
 dsh --profile web web
 ```
 
 适配器订阅 Harness 的 `session/event`，把 `assistant/chunk` 和 `assistant/message` 中的 usage 转成 `sample` 事件，并把 thinking、tool、done、error 等状态同步给桌宠。适配器入口位于 `src/dsh/index.ts`，连接配置位于 `cordis.patch.yml`。
+
+插件默认通过 `~/.deepseek-token-pet.json` 自动发现桌宠地址和鉴权 token；如果桌宠还没启动，会回退到 `http://127.0.0.1:47832`。也可以在插件配置里显式指定 `endpoint` 或 `discoveryFile`。
+
+DSH 插件会优先使用 WebSocket 持久连接（`/v1/ws`）发送心跳和事件；桌宠不支持 WS 时自动回退到 HTTP。usage 事件默认 150ms 合并成一批发送，activity 事件立即发送，保证 UI 状态及时。
 
 ## 嵌入其他客户端
 
@@ -238,13 +266,21 @@ import { TokenPetLedger, petEvent } from 'deepseek-token-pet/core'
 
 | 方法 | 地址 | 用途 |
 |---|---|---|
-| `POST` | `/v1/events` | 写入 usage、activity 或 reset 事件 |
+| `GET` | `/v1/info` | 获取协议版本、服务能力、心跳超时等信息 |
+| `GET` | `/v1/discovery` | 获取当前实例的地址、PID、鉴权 token 等发现信息 |
+| `WS` | `/v1/ws?source=...&token=...` | WebSocket 持久连接，支持 heartbeat、event/events、state 推送 |
+| `POST` | `/v1/events` | 写入 usage、activity 或 reset 事件（HTTP 回退） |
+| `POST` | `/v1/heartbeat` | DSH 插件心跳，用于显示连接状态（HTTP 回退） |
 | `GET` | `/v1/state` | 获取当前 token、食物和活动状态 |
 | `GET` | `/v1/stream` | 订阅 `state` 类型的 SSE 快照 |
 | `GET` | `/v1/foods` | 查看启动时扫描的食物清单 |
+| `GET` | `/v1/skins` | 重新扫描皮肤 ZIP 与已安装皮肤 |
+| `POST` | `/v1/skins/install` | 安装指定的相对路径皮肤 ZIP |
 | `POST` | `/v1/bowls/{index}/ack` | 确认第 index 份食物动画已完成 |
 
-`activity` 可用值：`idle`、`thinking`、`tool`、`waiting`、`error`、`done`。`reset` 是显式管理操作，普通适配器不应自动发送。
+服务启动时会额外写一份 `~/.deepseek-token-pet.json` 发现文件，包含 `url`、`port`、`authToken`、`protocolVersion` 等字段，方便插件自动发现。`authToken` 默认生成；目前 `requireAuth` 默认关闭以兼容旧客户端，后续可开启后要求写接口携带 `Authorization: Bearer <token>`。
+
+`state` 中的 `dshConnected`、`dshSource`、`dshLastSeenAt` 表示 DSH 插件最近一次心跳是否在有效窗口内。`activity` 可用值：`idle`、`thinking`、`tool`、`waiting`、`error`、`done`。`reset` 是显式管理操作，普通适配器不应自动发送。
 
 ## 开发与打包
 
@@ -254,6 +290,7 @@ import { TokenPetLedger, petEvent } from 'deepseek-token-pet/core'
 - `assets/character-face-idle.png`：4×96px 待机脸与刘海；
 - `assets/character-face-feed.png`：4×96px 进食脸与刘海；
 - `assets/foods/`：48×48 单图食物包；
+- `assets/legs/`：光腿、黑丝、白丝骨骼素材及脚掌、鞋子贴图；
 - `assets/source/`：重建运行素材所需的透明源图；
 - `scripts/build_sprites.py`：确定性素材处理脚本。
 
@@ -277,5 +314,21 @@ pnpm build
 pnpm pack --pack-destination release
 pnpm exec electron-builder --win portable
 ```
+
+生成 macOS 版（Apple Silicon/arm64）：
+
+```bash
+# 首次需要 512x512 以上图标；仓库内已生成 assets/icon-1024.png
+sips -z 1024 1024 assets/icon.png --out assets/icon-1024.png
+pnpm build
+pnpm exec electron-builder --mac dmg
+pnpm exec electron-builder --mac zip
+```
+
+产物位于 `release/desktop/DeepSeek Token Pet-0.2.6-arm64.dmg` 与
+`release/desktop/DeepSeek Token Pet-0.2.6-arm64-mac.zip`。
+未配置 Apple 开发者签名时会跳过签名，仅适合本机/内部测试分发。
+
+macOS 版默认不显示在程序坞，只显示在状态栏；状态栏使用米饭单色图标，菜单里会显示 `DSH 插件：已连接/未连接`。
 
 项目采用 MIT License。

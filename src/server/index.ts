@@ -1,17 +1,52 @@
 import { EventEmitter } from 'node:events'
-import { createReadStream, existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { createReadStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { extname, join, resolve, sep } from 'node:path'
+import { homedir } from 'node:os'
+import { dirname, extname, join, resolve, sep } from 'node:path'
+import { WebSocketServer, type RawData, type WebSocket } from 'ws'
 import { TokenPetLedger, type LedgerSeed, type PetSnapshotV1 } from '../core/index.js'
 import { scanFoodCatalog, type FoodCatalogV1 } from './food-catalog.js'
+import { ensureSkinRoot, installSkinPackage, resolveInstalledSkinAsset, scanSkinCatalog, type SkinCatalogV1 } from './skin-catalog.js'
 
 export * from './food-catalog.js'
+export * from './skin-catalog.js'
 
 export interface PetServerOptions {
   host?: string
   port?: number
   stateFile?: string
   packageRoot?: string
+  /** Optional pre-shared token. A random one is generated when omitted. */
+  authToken?: string
+  /** Require Bearer auth on write endpoints. Defaults to false for backward compatibility. */
+  requireAuth?: boolean
+  /** Where to publish endpoint discovery metadata. Defaults to ~/.deepseek-token-pet.json */
+  discoveryFile?: string
+  /** Root directory for installed leg/skin packages. */
+  skinRoot?: string
+}
+
+export interface PetDiscoveryV1 {
+  schema: 'deepseek-token-pet/discovery@1'
+  url: string
+  host: string
+  port: number
+  pid: number
+  protocolVersion: string
+  serverVersion: string
+  authToken?: string
+  requireAuth: boolean
+  startedAt: number
+}
+
+export interface PetServerInfoV1 {
+  schema: 'deepseek-token-pet/info@1'
+  protocolVersion: string
+  serverVersion: string
+  capabilities: string[]
+  heartbeatTimeoutMs: number
+  authRequired: boolean
 }
 
 export interface RunningPetServer {
@@ -19,11 +54,24 @@ export interface RunningPetServer {
   url: string
   state: () => PetSnapshotV1
   foods: FoodCatalogV1
+  info: () => PetServerInfoV1
+  discovery: () => PetDiscoveryV1
+  /** Subscribe to state changes. Returns an unsubscribe function. */
+  onState: (listener: (state: PetSnapshotV1) => void) => () => void
+  skins: () => SkinCatalogV1
   close: () => Promise<void>
 }
 
+export const PET_PROTOCOL_VERSION = 'deepseek-token-pet/protocol@1'
+export const PET_SERVER_VERSION = '0.5.0'
+export const DEFAULT_DISCOVERY_FILE = join(homedir(), '.deepseek-token-pet.json')
+
+const DSH_HEARTBEAT_TIMEOUT_MS = 30_000
+
 class PetStore extends EventEmitter {
   readonly ledger: TokenPetLedger
+  private heartbeatSource: string | undefined
+  private heartbeatAt: number | undefined
   constructor(private readonly stateFile?: string) {
     super()
     let seed: LedgerSeed = {}
@@ -32,8 +80,21 @@ class PetStore extends EventEmitter {
     }
     this.ledger = new TokenPetLedger(undefined, seed)
   }
-  publish(): PetSnapshotV1 {
+  markHeartbeat(source: string, at = Date.now()): void {
+    this.heartbeatSource = source
+    this.heartbeatAt = at
+  }
+  snapshot(): PetSnapshotV1 {
     const state = this.ledger.snapshot()
+    if (this.heartbeatAt === undefined) return state
+    const result: PetSnapshotV1 = { ...state }
+    result.dshConnected = Date.now() - this.heartbeatAt < DSH_HEARTBEAT_TIMEOUT_MS
+    result.dshLastSeenAt = this.heartbeatAt
+    if (this.heartbeatSource !== undefined) result.dshSource = this.heartbeatSource
+    return result
+  }
+  publish(): PetSnapshotV1 {
+    const state = this.snapshot()
     if (this.stateFile !== undefined) writeFileSync(this.stateFile, `${JSON.stringify(this.ledger.serialize(), null, 2)}\n`, 'utf8')
     this.emit('state', state)
     return state
@@ -45,38 +106,89 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
   const port = options.port ?? 47832
   const packageRoot = resolve(options.packageRoot ?? process.cwd())
   const assetRoot = resolve(packageRoot, 'assets')
+  const skinRoot = resolve(options.skinRoot ?? resolve(packageRoot, 'skin'))
+  ensureSkinRoot(skinRoot)
   const foodCatalog = scanFoodCatalog(resolve(assetRoot, 'foods'))
   const store = new PetStore(options.stateFile)
+  const authToken = options.authToken ?? randomBytes(24).toString('hex')
+  const requireAuth = options.requireAuth ?? false
+  const discoveryFile = resolve(options.discoveryFile ?? DEFAULT_DISCOVERY_FILE)
   const clients = new Set<ServerResponse>()
+  const wsClients = new Set<WebSocket>()
+  const stateListeners = new Set<(state: PetSnapshotV1) => void>()
   const broadcast = (state: PetSnapshotV1): void => {
     const payload = `event: state\ndata: ${JSON.stringify(state)}\n\n`
     for (const client of clients) client.write(payload)
+    const wsPayload = JSON.stringify({ type: 'state', state })
+    for (const client of wsClients) {
+      if (client.readyState === client.OPEN) client.send(wsPayload)
+    }
+    for (const listener of stateListeners) listener(state)
   }
   store.on('state', broadcast)
+
+  const authorized = (request: IncomingMessage): boolean => {
+    if (!requireAuth) return true
+    return request.headers.authorization === `Bearer ${authToken}`
+  }
+  const writeGuard = (request: IncomingMessage, response: ServerResponse): boolean => {
+    if (authorized(request)) return true
+    json(response, 401, { error: 'unauthorized' })
+    return false
+  }
 
   const server = createServer(async (request, response) => {
     cors(response)
     if (request.method === 'OPTIONS') { response.writeHead(204).end(); return }
     const url = new URL(request.url ?? '/', `http://${request.headers.host ?? `${host}:${port}`}`)
     try {
-      if (request.method === 'GET' && url.pathname === '/v1/state') return json(response, 200, store.ledger.snapshot())
+      if (request.method === 'GET' && url.pathname === '/v1/info') {
+        return json(response, 200, {
+          schema: 'deepseek-token-pet/info@1',
+          protocolVersion: PET_PROTOCOL_VERSION,
+          serverVersion: PET_SERVER_VERSION,
+          capabilities: ['events', 'heartbeat', 'state', 'stream', 'foods', 'bowls', 'discovery', 'ws'],
+          heartbeatTimeoutMs: DSH_HEARTBEAT_TIMEOUT_MS,
+          authRequired: requireAuth,
+        })
+      }
+      if (request.method === 'GET' && url.pathname === '/v1/state') return json(response, 200, store.snapshot())
       if (request.method === 'GET' && url.pathname === '/v1/foods') return json(response, 200, foodCatalog)
+      if (request.method === 'GET' && url.pathname === '/v1/discovery') return json(response, 200, discovery())
+      if (request.method === 'GET' && url.pathname === '/v1/skins') return json(response, 200, scanSkinCatalog(skinRoot))
       if (request.method === 'GET' && url.pathname === '/v1/stream') {
         response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' })
         clients.add(response)
-        response.write(`event: state\ndata: ${JSON.stringify(store.ledger.snapshot())}\n\n`)
+        response.write(`event: state\ndata: ${JSON.stringify(store.snapshot())}\n\n`)
         request.on('close', () => clients.delete(response))
         return
       }
+      if (request.method === 'POST' && url.pathname === '/v1/heartbeat') {
+        if (!writeGuard(request, response)) return
+        const body = await readJson(request) as { source?: unknown }
+        if (typeof body?.source !== 'string' || body.source.length === 0) {
+          return json(response, 400, { error: 'source_required' })
+        }
+        store.markHeartbeat(body.source)
+        return json(response, 200, { ok: true, state: store.publish() })
+      }
       if (request.method === 'POST' && url.pathname === '/v1/events') {
+        if (!writeGuard(request, response)) return
         const body = await readJson(request)
         const events = Array.isArray(body) ? body : [body]
         const results = events.map(event => store.ledger.ingest(event))
         const state = store.publish()
         return json(response, 202, { accepted: results.filter(result => result.accepted).length, state })
       }
+      if (request.method === 'POST' && url.pathname === '/v1/skins/install') {
+        const body = await readJson(request)
+        if (!isRecord(body) || typeof body.file !== 'string') return json(response, 400, { error: 'skin_package_file_required' })
+        const installed = installSkinPackage(skinRoot, body.file)
+        return json(response, 201, { installed, catalog: scanSkinCatalog(skinRoot) })
+      }
       const ack = request.method === 'POST' ? /^\/v1\/bowls\/(\d+)\/ack$/.exec(url.pathname) : null
       if (ack !== null) {
+        if (!writeGuard(request, response)) return
         store.ledger.acknowledgeBowl(Number(ack[1]))
         return json(response, 200, store.publish())
       }
@@ -86,6 +198,14 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
         const assetPath = resolve(packageRoot, `.${decodeURIComponent(url.pathname)}`)
         if (assetPath !== assetRoot && !assetPath.startsWith(`${assetRoot}${sep}`)) return json(response, 403, { error: 'asset_path_forbidden' })
         return file(response, assetPath)
+      }
+      const skinAsset = request.method === 'GET' ? /^\/skin-assets\/([^/]+)\/(.+)$/.exec(url.pathname) : null
+      if (skinAsset !== null) {
+        const skinId = decodeURIComponent(skinAsset[1] as string)
+        const assetPath = decodeURIComponent(skinAsset[2] as string)
+        const installedAsset = resolveInstalledSkinAsset(skinRoot, skinId, assetPath)
+        if (installedAsset === undefined) return json(response, 404, { error: 'skin_asset_not_found' })
+        return file(response, installedAsset)
       }
       return json(response, 404, { error: 'not_found' })
     } catch (error) {
@@ -99,16 +219,117 @@ export async function createPetServer(options: PetServerOptions = {}): Promise<R
   const address = server.address()
   const actualPort = typeof address === 'object' && address !== null ? address.port : port
   const url = `http://${host}:${actualPort}`
+  let discovery: () => PetDiscoveryV1
+  const info = (): PetServerInfoV1 => ({
+    schema: 'deepseek-token-pet/info@1',
+    protocolVersion: PET_PROTOCOL_VERSION,
+    serverVersion: PET_SERVER_VERSION,
+    capabilities: ['events', 'heartbeat', 'state', 'stream', 'foods', 'bowls', 'discovery', 'ws'],
+    heartbeatTimeoutMs: DSH_HEARTBEAT_TIMEOUT_MS,
+    authRequired: requireAuth,
+  })
+  const handleWsMessage = (socket: WebSocket, message: unknown, source: string): void => {
+    if (message === null || typeof message !== 'object') {
+      socket.send(JSON.stringify({ type: 'error', error: 'invalid_message' }))
+      return
+    }
+    const msg = message as Record<string, unknown>
+    if (msg.type === 'heartbeat') {
+      store.markHeartbeat(source)
+      socket.send(JSON.stringify({ type: 'pong', time: Date.now(), state: store.publish() }))
+      return
+    }
+    if (msg.type === 'event' || msg.type === 'events') {
+      const raw = msg.type === 'event' ? msg.event : msg.events
+      const events = Array.isArray(raw) ? raw : raw === undefined ? [] : [raw]
+      const results = events.map(event => store.ledger.ingest(event))
+      const state = store.publish()
+      socket.send(JSON.stringify({ type: 'ack', accepted: results.filter(result => result.accepted).length, state }))
+      return
+    }
+    if (msg.type === 'ping') {
+      socket.send(JSON.stringify({ type: 'pong', time: Date.now() }))
+      return
+    }
+    socket.send(JSON.stringify({ type: 'error', error: 'unknown_message_type' }))
+  }
+  const wss = new WebSocketServer({ server, path: '/v1/ws' })
+  wss.on('connection', (socket, request) => {
+    const requestUrl = new URL(request.url ?? '/', `http://${request.headers.host ?? `${host}:${port}`}`)
+    const source = requestUrl.searchParams.get('source') ?? 'unknown'
+    const token = requestUrl.searchParams.get('token')
+    if (requireAuth && token !== authToken) {
+      socket.close(1008, 'unauthorized')
+      return
+    }
+    wsClients.add(socket)
+    socket.on('message', (data: RawData) => {
+      let message: unknown
+      try {
+        message = JSON.parse(data.toString())
+      } catch {
+        socket.send(JSON.stringify({ type: 'error', error: 'invalid_json' }))
+        return
+      }
+      handleWsMessage(socket, message, source)
+    })
+    socket.on('close', () => wsClients.delete(socket))
+    socket.on('error', () => wsClients.delete(socket))
+    store.markHeartbeat(source)
+    socket.send(JSON.stringify({ type: 'hello', ok: true, info: info(), state: store.snapshot() }))
+  })
+  const writeDiscovery = (): void => {
+    discovery = () => ({
+      schema: 'deepseek-token-pet/discovery@1',
+      url,
+      host,
+      port: actualPort,
+      pid: process.pid,
+      protocolVersion: PET_PROTOCOL_VERSION,
+      serverVersion: PET_SERVER_VERSION,
+      authToken,
+      requireAuth,
+      startedAt: Date.now(),
+    })
+    const payload = `${JSON.stringify(discovery(), null, 2)}\n`
+    mkdirSync(dirname(discoveryFile), { recursive: true })
+    writeFileSync(discoveryFile, payload, { encoding: 'utf8', mode: 0o600 })
+  }
+  writeDiscovery()
   return {
     server, url,
-    state: () => store.ledger.snapshot(), foods: foodCatalog,
-    close: () => new Promise<void>((resolveClose, reject) => server.close(error => error === undefined ? resolveClose() : reject(error))),
+    state: () => store.snapshot(), foods: foodCatalog,
+    info,
+    discovery: () => discovery(),
+    onState: (listener) => {
+      stateListeners.add(listener)
+      return () => stateListeners.delete(listener)
+    },
+    skins: () => scanSkinCatalog(skinRoot),
+    close: () => new Promise<void>((resolveClose, reject) => {
+      for (const client of wsClients) client.close(1001, 'server closing')
+      wss.close()
+      server.close(error => {
+        if (error !== undefined) { reject(error); return }
+        try {
+          if (existsSync(discoveryFile)) {
+            const current = JSON.parse(readFileSync(discoveryFile, 'utf8')) as PetDiscoveryV1
+            if (current.url === url && current.pid === process.pid && current.authToken === authToken) {
+              rmSync(discoveryFile, { force: true })
+            }
+          }
+        } catch {
+          // Best-effort cleanup; stale discovery files are overwritten on next start.
+        }
+        resolveClose()
+      })
+    }),
   }
 }
 
 function cors(response: ServerResponse): void {
   response.setHeader('Access-Control-Allow-Origin', '*')
-  response.setHeader('Access-Control-Allow-Headers', 'content-type')
+  response.setHeader('Access-Control-Allow-Headers', 'content-type, authorization')
   response.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
 }
 function json(response: ServerResponse, status: number, value: unknown): void { response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify(value)) }
@@ -127,9 +348,11 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
 function file(response: ServerResponse, path: string): void {
   if (!existsSync(path)) { json(response, 404, { error: 'asset_not_found' }); return }
   const extension = extname(path)
-  const contentType = ({ '.js': 'text/javascript', '.png': 'image/png', '.json': 'application/json' } as Record<string, string>)[extension] ?? 'application/octet-stream'
-  const cacheControl = extension === '.js' || extension === '.png' ? 'no-cache, no-store, must-revalidate' : 'public, max-age=3600'
+  const contentType = ({ '.js': 'text/javascript', '.png': 'image/png', '.svg': 'image/svg+xml', '.json': 'application/json' } as Record<string, string>)[extension] ?? 'application/octet-stream'
+  const cacheControl = extension === '.js' || extension === '.png' || extension === '.svg' ? 'no-cache, no-store, must-revalidate' : 'public, max-age=3600'
   response.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': cacheControl })
   createReadStream(path).pipe(response)
 }
 function demoHtml(): string { return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>DeepSeek Token Pet</title><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}body{display:grid;place-items:center;-webkit-app-region:drag}</style></head><body><deepseek-token-pet endpoint="" asset-base="/assets"></deepseek-token-pet><script type="module">import '/widget.js?v=0.2.4';const pet=document.querySelector('deepseek-token-pet');pet.setAttribute('endpoint',location.origin);if(new URLSearchParams(location.search).has('desktop'))pet.addEventListener('pet-resize',event=>window.resizeTo(event.detail.width,event.detail.height));</script></body></html>` }
+
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) }
