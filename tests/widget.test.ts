@@ -2,8 +2,25 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DeepseekTokenPetElement } from '../src/widget/index.js'
 
+// Node 26's built-in localStorage is gated behind --localstorage-file and is
+// undefined under the jsdom environment; polyfill it for widget persistence tests.
+const storage = new Map<string, string>()
+const localStorageMock: Storage = {
+  getItem: key => storage.get(key) ?? null,
+  setItem: (key, value) => { storage.set(key, String(value)) },
+  removeItem: key => { storage.delete(key) },
+  clear: () => { storage.clear() },
+  key: index => Array.from(storage.keys())[index] ?? null,
+  get length() { return storage.size },
+}
+Object.defineProperty(globalThis, 'localStorage', { value: localStorageMock, configurable: true })
+
 describe('web component', () => {
-  afterEach(() => document.body.replaceChildren())
+  afterEach(() => {
+    document.body.replaceChildren()
+    localStorage.clear()
+    vi.useRealTimers()
+  })
 
   it('can be embedded and fed tokens without the daemon', () => {
     const element = new DeepseekTokenPetElement()
@@ -34,7 +51,8 @@ describe('web component', () => {
 
     expect(element.shadowRoot?.querySelector('.bowl.eating')).not.toBeNull()
     expect((element.shadowRoot?.querySelector('.bowl.eating') as HTMLElement).style.backgroundImage).toContain('?v=20260817-v5')
-    expect(element.shadowRoot?.querySelector('style')?.textContent).toContain('translate(68px,0)')
+    expect(element.shadowRoot?.querySelector('style')?.textContent).toContain('translate(var(--food-distance),0)')
+    expect(element.style.getPropertyValue('--food-distance')).toBe('68px')
     expect((element.shadowRoot?.querySelector('.character-face') as HTMLElement).style.backgroundImage).toContain('character-face-feed.png')
     expect((element.shadowRoot?.querySelector('.character-face') as HTMLElement).dataset.expression).toBe('feed')
     expect((element.shadowRoot?.querySelector('.character-body') as HTMLElement).style.backgroundImage).toBe(bodyImage)
@@ -58,18 +76,89 @@ describe('web component', () => {
     element.setScale(1.5)
 
     expect(element.style.width).toBe('660px')
-    expect(element.style.height).toBe('387px')
+    expect(element.style.height).toBe('435px')
     expect(element.getAttribute('scale')).toBe('1.500')
     expect(resized).toHaveBeenCalledOnce()
     expect(element.shadowRoot?.querySelector('.resize-handle')).not.toBeNull()
+    expect(element.shadowRoot?.querySelector('.settings-toggle')?.textContent).toBe('⚙')
     expect(element.shadowRoot?.querySelector('style')?.textContent).toContain('right:61px')
+    expect(element.shadowRoot?.querySelector('style')?.textContent).toContain('right:346px')
 
     const internals = element as unknown as {
       resizeStart: { x: number, y: number, scale: number }
       resizeFromPointer: (event: PointerEvent) => void
     }
     internals.resizeStart = { x: 100, y: 100, scale: 1.5 }
-    internals.resizeFromPointer({ clientX: 144, clientY: 125.8 } as PointerEvent)
+    internals.resizeFromPointer({ clientX: 144, clientY: 129 } as PointerEvent)
     expect(element.getAttribute('scale')).toBe('1.600')
+  })
+
+  it('persists settings, previews the mouth target, and reloads food motion dynamically', () => {
+    vi.useFakeTimers()
+    const element = new DeepseekTokenPetElement()
+    document.body.append(element)
+    const root = element.shadowRoot as ShadowRoot
+
+    root.querySelector<HTMLButtonElement>('.settings-toggle')?.click()
+    expect((root.querySelector('.settings-panel') as HTMLElement).hidden).toBe(false)
+    expect((root.querySelector('.feed-target-marker') as HTMLElement).hidden).toBe(false)
+    expect((root.querySelector('.feed-flight-guide') as HTMLElement).hidden).toBe(false)
+    expect(root.querySelector('.feed-distance-label')?.textContent).toBe('68px')
+
+    const offsetX = root.querySelector<HTMLInputElement>('[data-setting="feed.offsetX"]') as HTMLInputElement
+    offsetX.value = '12'
+    offsetX.dispatchEvent(new Event('input', { bubbles: true }))
+    expect(element.settings.feed.offsetX).toBe(12)
+    expect(element.style.getPropertyValue('--feed-offset-x')).toBe('12px')
+
+    element.feedOnce()
+    const eating = root.querySelector('.bowl.eating') as HTMLElement
+    const distance = root.querySelector<HTMLInputElement>('[data-setting="feed.distance"]') as HTMLInputElement
+    distance.value = '92'
+    distance.dispatchEvent(new Event('input', { bubbles: true }))
+    expect(element.settings.feed.distance).toBe(92)
+    expect(element.style.getPropertyValue('--food-distance')).toBe('92px')
+    expect(element.style.getPropertyValue('--food-half-distance')).toBe('46px')
+    expect(root.querySelector('.feed-distance-label')?.textContent).toBe('92px')
+    expect(root.querySelector('style')?.textContent).toContain('border-top:2px dashed')
+    expect(eating.dataset.animationReloaded).toBe('true')
+
+    const progressColor = root.querySelector<HTMLInputElement>('[data-setting="theme.progressFill"]') as HTMLInputElement
+    progressColor.value = '#12abef'
+    progressColor.dispatchEvent(new Event('input', { bubbles: true }))
+    expect(element.style.getPropertyValue('--progress-fill')).toBe('#12abef')
+
+    const saved = JSON.parse(localStorage.getItem('deepseek-token-pet/widget-settings@1') ?? '{}') as { feed?: { offsetX?: number, distance?: number } }
+    expect(saved.feed).toMatchObject({ offsetX: 12, distance: 92 })
+  })
+
+  it('applies the persisted startup scale and can restore the verified defaults', () => {
+    const first = new DeepseekTokenPetElement()
+    document.body.append(first)
+    first.updateSettings({
+      initialScalePercent: 125,
+      feed: { offsetY: -8 },
+      theme: { buttonBackground: '#112233', buttonBorder: '#abcdef', buttonText: '#fedcba', progressFill: '#123456' },
+    })
+    expect(first.style.width).toBe('550px')
+    expect(first.style.height).toBe('363px')
+    first.remove()
+
+    const second = new DeepseekTokenPetElement()
+    document.body.append(second)
+    expect(second.settings.initialScalePercent).toBe(125)
+    expect(second.style.width).toBe('550px')
+    expect(second.style.getPropertyValue('--button-bg')).toBe('#112233')
+
+    second.shadowRoot?.querySelector<HTMLButtonElement>('.reset-settings')?.click()
+    expect(second.settings.feed).toEqual({ offsetX: 0, offsetY: 0, distance: 68 })
+    expect(second.settings.initialScalePercent).toBe(100)
+    expect(second.settings.theme).toEqual({
+      buttonBackground: '#16295f',
+      buttonBorder: '#79b8ff',
+      buttonText: '#ffffff',
+      progressFill: '#4387e7',
+    })
+    expect(second.style.width).toBe('440px')
   })
 })

@@ -1,23 +1,68 @@
 import { TokenPetLedger, petEvent, type PetEventV1, type PetSnapshotV1 } from '../core/index.js'
 import type { FoodAssetV1, FoodCatalogV1 } from '../server/food-catalog.js'
+import {
+  DEFAULT_WIDGET_SETTINGS,
+  PET_SETTINGS_STORAGE_KEY,
+  cloneWidgetSettings,
+  loadWidgetSettings,
+  mergeWidgetSettings,
+  saveWidgetSettings,
+  type PetWidgetSettingsPatch,
+  type PetWidgetSettingsV1,
+} from './settings.js'
+
+export * from './settings.js'
 
 const HTMLElementBase = (globalThis.HTMLElement ?? class {}) as typeof HTMLElement
 const ASSET_REVISION = '20260817-v5'
+const PET_WIDTH = 440
+const PET_HEIGHT = 290
 
 const styles = String.raw`
-:host{--pet-scale:1;position:relative;display:block;width:440px;height:258px;contain:layout paint style;user-select:none;-webkit-user-select:none;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#eef6ff}
-*{box-sizing:border-box}.root{position:absolute;left:0;bottom:0;width:440px;height:258px;overflow:hidden;transform:scale(var(--pet-scale));transform-origin:left bottom;image-rendering:pixelated;filter:drop-shadow(0 3px 0 rgba(8,18,58,.32))}
+:host{--pet-scale:1;--feed-offset-x:0px;--feed-offset-y:0px;--food-distance:68px;--food-half-distance:34px;--button-bg:#16295f;--button-border:#79b8ff;--button-text:#fff;--progress-fill:#4387e7;position:relative;display:block;width:${PET_WIDTH}px;height:${PET_HEIGHT}px;contain:layout paint style;user-select:none;-webkit-user-select:none;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#eef6ff}
+*{box-sizing:border-box}.root{position:absolute;left:0;bottom:0;width:${PET_WIDTH}px;height:${PET_HEIGHT}px;overflow:hidden;transform:scale(var(--pet-scale));transform-origin:left bottom;image-rendering:pixelated;filter:drop-shadow(0 3px 0 rgba(8,18,58,.32))}
 .stage{position:absolute;inset:0 0 30px 0}.character{position:absolute;right:120px;bottom:-28px;width:256px;height:256px;image-rendering:pixelated;z-index:2}
 .character-layer{position:absolute;inset:0;width:256px;height:256px;background-repeat:no-repeat;background-position:0 0;image-rendering:pixelated}.tail-canvas{position:absolute;left:0;top:0;width:360px;height:256px;z-index:0;image-rendering:pixelated}.character-body{z-index:1;background-size:100% 100%}.character-face{z-index:2;background-size:400% 100%}
 .character-layer[data-frame="0"]{background-position:0 0}.character-layer[data-frame="1"]{background-position:33.333% 0}.character-layer[data-frame="2"]{background-position:66.666% 0}.character-layer[data-frame="3"]{background-position:100% 0}
 .character.error{filter:saturate(.3) brightness(.85)}
-.queue{position:absolute;left:48px;right:160px;bottom:40px;height:64px;z-index:4;pointer-events:none}.bowl{position:absolute;width:64px;height:64px;background-repeat:no-repeat;background-size:100% 100%;background-position:0 0;image-rendering:pixelated;filter:drop-shadow(0 2px 0 rgba(8,18,58,.22))}.bowl.waiting{left:calc(var(--slot)*52px);opacity:calc(1 - var(--slot)*.1)}
+.queue{position:absolute;left:calc(116px + var(--feed-offset-x) - var(--food-distance));bottom:calc(40px - var(--feed-offset-y));width:260px;height:64px;z-index:4;pointer-events:none}.bowl{position:absolute;width:64px;height:64px;background-repeat:no-repeat;background-size:100% 100%;background-position:0 0;image-rendering:pixelated;filter:drop-shadow(0 2px 0 rgba(8,18,58,.22))}.bowl.waiting{left:calc(var(--slot)*52px);opacity:calc(1 - var(--slot)*.1)}
 .bowl.eating{left:0;animation:eatPath var(--eat-ms,900ms) linear forwards}.overflow{position:absolute;left:8px;bottom:52px;padding:2px 5px;background:#16295f;border:2px solid #79b8ff;border-radius:2px;color:white;font-size:11px;z-index:4}
-.hud{position:absolute;right:164px;bottom:4px;width:174px;height:25px;display:flex;align-items:center;gap:8px;padding:3px 7px;background:rgba(11,25,65,.9);border:2px solid #6faeff;border-radius:3px;box-shadow:inset 0 0 0 2px #263f86;font-size:12px;line-height:1;z-index:5}.meter{height:9px;flex:0 0 104px;background:#071331;border:1px solid #94c8ff;padding:1px}.fill{height:100%;width:calc(var(--progress)*100%);background:linear-gradient(90deg,#4387e7,#b9e4ff);transition:width .25s steps(8,end)}.bowl-count{margin-left:auto;white-space:nowrap}
-.manual-feed{position:absolute;right:94px;bottom:4px;width:62px;height:25px;padding:0;border:2px solid #79b8ff;border-radius:3px;background:#16295f;color:#fff;box-shadow:inset 0 0 0 2px #263f86;font:12px/20px ui-monospace,SFMono-Regular,Consolas,monospace;cursor:pointer;z-index:6;image-rendering:pixelated;-webkit-app-region:no-drag}.manual-feed:hover{background:#24468f}.manual-feed:active{transform:translateY(1px)}
-.resize-handle{position:absolute;right:61px;bottom:4px;width:25px;height:25px;padding:0;border:2px solid #79b8ff;border-radius:3px;background:#16295f;color:#d9eeff;box-shadow:inset 0 0 0 2px #263f86;font:16px/20px monospace;cursor:nwse-resize;z-index:20;touch-action:none;-webkit-app-region:no-drag}.resize-handle:hover{background:#24468f}.resize-handle::before{content:'↘';display:block;transform:translateY(-1px)}
-@keyframes eatPath{0%{transform:translate(0,0);opacity:1}45%{transform:translate(34px,0);opacity:1}89%{transform:translate(68px,0);opacity:1}89.1%,100%{transform:translate(68px,0);opacity:0}}
+.hud{position:absolute;right:164px;bottom:4px;width:174px;height:25px;display:flex;align-items:center;gap:8px;padding:3px 7px;background:rgba(11,25,65,.9);border:2px solid #6faeff;border-radius:3px;box-shadow:inset 0 0 0 2px #263f86;font-size:12px;line-height:1;z-index:5}.meter{height:9px;flex:0 0 104px;background:#071331;border:1px solid #94c8ff;padding:1px}.fill{height:100%;width:calc(var(--progress)*100%);background:var(--progress-fill);transition:width .25s steps(8,end)}.bowl-count{margin-left:auto;white-space:nowrap}
+.settings-toggle,.manual-feed,.resize-handle,.settings-close,.reset-settings{padding:0;border:2px solid var(--button-border);border-radius:3px;background:var(--button-bg);color:var(--button-text);box-shadow:inset 0 0 0 2px color-mix(in srgb,var(--button-border) 35%,transparent);cursor:pointer;image-rendering:pixelated;-webkit-app-region:no-drag}.settings-toggle:hover,.manual-feed:hover,.resize-handle:hover,.settings-close:hover,.reset-settings:hover{filter:brightness(1.25)}.settings-toggle:active,.manual-feed:active,.resize-handle:active,.reset-settings:active{transform:translateY(1px)}
+.settings-toggle{position:absolute;right:346px;bottom:4px;width:25px;height:25px;font:15px/20px sans-serif;z-index:20}.manual-feed{position:absolute;right:94px;bottom:4px;width:62px;height:25px;font:12px/20px ui-monospace,SFMono-Regular,Consolas,monospace;z-index:6}.resize-handle{position:absolute;right:61px;bottom:4px;width:25px;height:25px;font:16px/20px monospace;cursor:nwse-resize;z-index:20;touch-action:none}.resize-handle::before{content:'↘';display:block;transform:translateY(-1px)}
+.settings-panel{position:absolute;right:8px;bottom:36px;width:264px;padding:7px 8px 8px;border:2px solid var(--button-border);border-radius:4px;background:rgba(8,18,48,.97);color:var(--button-text);box-shadow:inset 0 0 0 2px color-mix(in srgb,var(--button-border) 28%,transparent),0 3px 0 rgba(3,8,25,.45);font:10px/1.25 ui-monospace,SFMono-Regular,Consolas,monospace;z-index:40;image-rendering:auto;-webkit-app-region:no-drag}.settings-panel[hidden],.feed-target-marker[hidden],.feed-flight-guide[hidden]{display:none}.settings-header{height:22px;display:flex;align-items:center;justify-content:space-between;padding-left:2px;font-size:12px}.settings-close{width:21px;height:21px;font:14px/16px monospace}.settings-panel fieldset{margin:3px 0 5px;padding:4px 6px 5px;border:1px solid var(--button-border)}.settings-panel legend{padding:0 4px;color:var(--button-text)}.setting-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px}.setting-grid.theme{grid-template-columns:repeat(2,1fr)}.setting-row{display:flex;align-items:center;justify-content:space-between;gap:5px;margin:4px 0}.setting-grid label{display:flex;flex-direction:column;align-items:stretch;gap:2px;white-space:nowrap}.setting-grid.theme label{display:grid;grid-template-columns:1fr 30px;align-items:center;gap:3px}.settings-panel input[type=number]{min-width:0;width:100%;height:19px;padding:1px 2px;border:1px solid var(--button-border);background:#071331;color:var(--button-text);font:10px monospace}.setting-row input[type=number]{width:48px}.settings-panel input[type=color]{width:30px;height:20px;padding:1px;border:1px solid var(--button-border);background:#071331}.settings-hint{margin:3px 0 0;color:#b9d9ff}.settings-actions{display:flex;justify-content:flex-end}.reset-settings{height:23px;padding:0 8px;font:10px/18px ui-monospace,SFMono-Regular,Consolas,monospace}
+.feed-flight-guide{position:absolute;left:calc(148px + var(--feed-offset-x) - var(--food-distance));bottom:calc(102px - var(--feed-offset-y));width:var(--food-distance);height:0;border-top:2px dashed #ff5b72;z-index:34;pointer-events:none}.feed-flight-guide::before{content:'';position:absolute;left:-3px;top:-4px;width:6px;height:6px;border:1px solid #fff;background:#ff304c}.feed-distance-label{position:absolute;left:50%;top:-15px;transform:translateX(-50%);padding:1px 3px;background:#81162b;color:#fff;white-space:nowrap;font:9px/11px monospace}.feed-target-marker{position:absolute;left:calc(148px + var(--feed-offset-x));bottom:calc(102px - var(--feed-offset-y));width:19px;height:19px;transform:translate(-50%,50%);border:1px solid #fff;background:rgba(255,48,76,.25);z-index:35;pointer-events:none}.feed-target-marker::before,.feed-target-marker::after{content:'';position:absolute;background:#ff304c}.feed-target-marker::before{left:8px;top:-5px;width:2px;height:27px}.feed-target-marker::after{left:-5px;top:8px;width:27px;height:2px}.feed-target-label{position:absolute;right:13px;top:-13px;padding:1px 3px;background:#81162b;color:#fff;white-space:nowrap;font:9px/11px monospace}
+@keyframes eatPath{0%{transform:translate(0,0);opacity:1}45%{transform:translate(var(--food-half-distance),0);opacity:1}89%{transform:translate(var(--food-distance),0);opacity:1}89.1%,100%{transform:translate(var(--food-distance),0);opacity:0}}
 @media (prefers-reduced-motion:reduce){.bowl.eating{animation-duration:1ms}}
+`
+
+const settingsMarkup = String.raw`
+<button class="settings-toggle" type="button" aria-label="打开桌宠设置" aria-expanded="false" title="桌宠设置">⚙</button>
+<div class="settings-panel" role="dialog" aria-label="桌宠设置" hidden>
+  <div class="settings-header"><strong>桌宠设置</strong><button class="settings-close" type="button" aria-label="关闭设置">×</button></div>
+  <fieldset>
+    <legend>投喂消失点</legend>
+    <div class="setting-grid">
+      <label>X 偏移 <input type="number" min="-120" max="120" step="1" data-setting="feed.offsetX"></label>
+      <label>Y 偏移 <input type="number" min="-120" max="120" step="1" data-setting="feed.offsetY"></label>
+      <label>飞行距离 <input type="number" min="20" max="180" step="1" data-setting="feed.distance"></label>
+    </div>
+    <p class="settings-hint">红色十字是食物消失位置，单位为像素。</p>
+  </fieldset>
+  <div class="setting-row"><label for="pet-initial-scale">初始化尺寸</label><span><input id="pet-initial-scale" type="number" min="60" max="200" step="5" data-setting="initialScalePercent">%</span></div>
+  <fieldset>
+    <legend>按钮主题色</legend>
+    <div class="setting-grid theme">
+      <label>按钮背景 <input type="color" data-setting="theme.buttonBackground"></label>
+      <label>按钮边框 <input type="color" data-setting="theme.buttonBorder"></label>
+      <label>按钮字体 <input type="color" data-setting="theme.buttonText"></label>
+      <label>进度填充 <input type="color" data-setting="theme.progressFill"></label>
+    </div>
+  </fieldset>
+  <div class="settings-actions"><button class="reset-settings" type="button">恢复默认</button></div>
+</div>
+<div class="feed-flight-guide" aria-hidden="true" hidden><span class="feed-distance-label">68px</span></div>
+<div class="feed-target-marker" aria-hidden="true" hidden><span class="feed-target-label">消失点</span></div>
 `
 
 export class DeepseekTokenPetElement extends HTMLElementBase {
@@ -51,17 +96,31 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
   private scaleValue = 1
   private resizeHandle: HTMLButtonElement | undefined
   private resizeStart: { x: number, y: number, scale: number } | undefined
+  private settingsValue = loadWidgetSettings()
+  private settingsPanel: HTMLElement | undefined
+  private settingsToggle: HTMLButtonElement | undefined
+  private feedTargetMarker: HTMLElement | undefined
+  private feedFlightGuide: HTMLElement | undefined
+  private feedDistanceLabel: HTMLElement | undefined
+  private readonly storageListener = (event: StorageEvent): void => {
+    if (event.key !== PET_SETTINGS_STORAGE_KEY) return
+    this.settingsValue = loadWidgetSettings()
+    this.applySettings(true)
+    this.setScale(this.settingsValue.initialScalePercent / 100)
+  }
 
   static get observedAttributes(): string[] { return ['endpoint', 'asset-base', 'scale'] }
 
   connectedCallback(): void {
     if (this.rootNode === undefined) this.mount()
+    globalThis.addEventListener?.('storage', this.storageListener)
     this.startIdleAnimations()
     void this.connectEndpoint()
   }
 
   disconnectedCallback(): void {
     this.stream?.close()
+    globalThis.removeEventListener?.('storage', this.storageListener)
     this.stopIdleAnimations()
   }
   attributeChangedCallback(name: string): void {
@@ -95,6 +154,28 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
     if (!this.isConnected) this.applyScale(next)
   }
 
+  get settings(): PetWidgetSettingsV1 { return cloneWidgetSettings(this.settingsValue) }
+
+  updateSettings(patch: PetWidgetSettingsPatch): PetWidgetSettingsV1 {
+    const feedChanged = patch.feed !== undefined
+    const scaleChanged = patch.initialScalePercent !== undefined
+    this.settingsValue = mergeWidgetSettings(this.settingsValue, patch)
+    saveWidgetSettings(this.settingsValue)
+    this.applySettings(feedChanged)
+    if (scaleChanged) this.setScale(this.settingsValue.initialScalePercent / 100)
+    this.dispatchSettingsChange()
+    return this.settings
+  }
+
+  resetSettings(): PetWidgetSettingsV1 {
+    this.settingsValue = cloneWidgetSettings(DEFAULT_WIDGET_SETTINGS)
+    saveWidgetSettings(this.settingsValue)
+    this.applySettings(true)
+    this.setScale(this.settingsValue.initialScalePercent / 100)
+    this.dispatchSettingsChange()
+    return this.settings
+  }
+
   setState(snapshot: PetSnapshotV1, trackUsage = true): void {
     if (snapshot.revision < this.snapshotValue.revision) return
     const tokenDelta = snapshot.totalTokens - this.lastObservedTotal
@@ -110,7 +191,7 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
 
   private mount(): void {
     this.rootNode = this.attachShadow({ mode: 'open' })
-    this.rootNode.innerHTML = `<style>${styles}</style><div class="root"><div class="stage"><div class="queue"></div><div class="character"><canvas class="tail-canvas" width="135" height="96" data-joints="6" data-resample="2.667" data-root-width="84" data-tip-width="32"></canvas><div class="character-layer character-body"></div><div class="character-layer character-face" data-frame="0" data-expression="idle"></div></div></div><div class="hud"><div class="meter" title="下一碗饭进度"><div class="fill"></div></div><span class="bowl-count"></span></div><button class="manual-feed" type="button" title="只播放动画，不增加 token">喂饭</button><button class="resize-handle" type="button" aria-label="拖动缩放" title="拖动缩放"></button></div>`
+    this.rootNode.innerHTML = `<style>${styles}</style><div class="root"><div class="stage"><div class="queue"></div><div class="character"><canvas class="tail-canvas" width="135" height="96" data-joints="6" data-resample="2.667" data-root-width="84" data-tip-width="32"></canvas><div class="character-layer character-body"></div><div class="character-layer character-face" data-frame="0" data-expression="idle"></div></div></div><div class="hud"><div class="meter" title="下一碗饭进度"><div class="fill"></div></div><span class="bowl-count"></span></div><button class="manual-feed" type="button" title="只播放动画，不增加 token">喂饭</button><button class="resize-handle" type="button" aria-label="拖动缩放" title="拖动缩放"></button>${settingsMarkup}</div>`
     this.character = this.rootNode.querySelector<HTMLElement>('.character') ?? undefined
     this.bodyLayer = this.rootNode.querySelector<HTMLElement>('.character-body') ?? undefined
     this.faceLayer = this.rootNode.querySelector<HTMLElement>('.character-face') ?? undefined
@@ -120,7 +201,16 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
     this.fill = this.rootNode.querySelector<HTMLElement>('.fill') ?? undefined
     this.bowlCountLabel = this.rootNode.querySelector<HTMLElement>('.bowl-count') ?? undefined
     this.resizeHandle = this.rootNode.querySelector<HTMLButtonElement>('.resize-handle') ?? undefined
+    this.settingsPanel = this.rootNode.querySelector<HTMLElement>('.settings-panel') ?? undefined
+    this.settingsToggle = this.rootNode.querySelector<HTMLButtonElement>('.settings-toggle') ?? undefined
+    this.feedTargetMarker = this.rootNode.querySelector<HTMLElement>('.feed-target-marker') ?? undefined
+    this.feedFlightGuide = this.rootNode.querySelector<HTMLElement>('.feed-flight-guide') ?? undefined
+    this.feedDistanceLabel = this.rootNode.querySelector<HTMLElement>('.feed-distance-label') ?? undefined
     this.rootNode.querySelector<HTMLButtonElement>('.manual-feed')?.addEventListener('click', () => this.feedOnce())
+    this.settingsToggle?.addEventListener('click', () => this.toggleSettings())
+    this.rootNode.querySelector<HTMLButtonElement>('.settings-close')?.addEventListener('click', () => this.toggleSettings(false))
+    this.rootNode.querySelector<HTMLButtonElement>('.reset-settings')?.addEventListener('click', () => this.resetSettings())
+    this.settingsPanel?.addEventListener('input', event => this.handleSettingsInput(event))
     this.resizeHandle?.addEventListener('pointerdown', event => this.beginResize(event))
     this.resizeHandle?.addEventListener('pointermove', event => this.resizeFromPointer(event))
     this.resizeHandle?.addEventListener('pointerup', event => this.endResize(event))
@@ -130,14 +220,94 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
     this.updateTailSpeed()
     this.drawTail()
     this.renderState()
-    this.applyScale()
+    this.applySettings()
+    this.applyScale(this.hasAttribute('scale') ? Number(this.getAttribute('scale')) : this.settingsValue.initialScalePercent / 100)
+  }
+
+  private toggleSettings(force?: boolean): void {
+    if (this.settingsPanel === undefined) return
+    const open = force ?? this.settingsPanel.hidden
+    this.settingsPanel.hidden = !open
+    if (this.feedTargetMarker !== undefined) this.feedTargetMarker.hidden = !open
+    if (this.feedFlightGuide !== undefined) this.feedFlightGuide.hidden = !open
+    this.settingsToggle?.setAttribute('aria-expanded', String(open))
+    if (open) this.syncSettingsForm()
+  }
+
+  private handleSettingsInput(event: Event): void {
+    const input = event.target
+    if (!(input instanceof HTMLInputElement)) return
+    const setting = input.dataset.setting
+    if (setting === undefined) return
+    const numericValue = input.type === 'number' ? input.valueAsNumber : undefined
+    if (input.type === 'number' && !Number.isFinite(numericValue)) return
+    switch (setting) {
+      case 'feed.offsetX': this.updateSettings({ feed: { offsetX: numericValue as number } }); break
+      case 'feed.offsetY': this.updateSettings({ feed: { offsetY: numericValue as number } }); break
+      case 'feed.distance': this.updateSettings({ feed: { distance: numericValue as number } }); break
+      case 'initialScalePercent': this.updateSettings({ initialScalePercent: numericValue as number }); break
+      case 'theme.buttonBackground': this.updateSettings({ theme: { buttonBackground: input.value } }); break
+      case 'theme.buttonBorder': this.updateSettings({ theme: { buttonBorder: input.value } }); break
+      case 'theme.buttonText': this.updateSettings({ theme: { buttonText: input.value } }); break
+      case 'theme.progressFill': this.updateSettings({ theme: { progressFill: input.value } }); break
+    }
+  }
+
+  private applySettings(reloadFoodAnimation = false): void {
+    const { feed, theme } = this.settingsValue
+    this.style.setProperty('--feed-offset-x', `${feed.offsetX}px`)
+    this.style.setProperty('--feed-offset-y', `${feed.offsetY}px`)
+    this.style.setProperty('--food-distance', `${feed.distance}px`)
+    this.style.setProperty('--food-half-distance', `${feed.distance / 2}px`)
+    this.style.setProperty('--button-bg', theme.buttonBackground)
+    this.style.setProperty('--button-border', theme.buttonBorder)
+    this.style.setProperty('--button-text', theme.buttonText)
+    this.style.setProperty('--progress-fill', theme.progressFill)
+    if (this.feedDistanceLabel !== undefined) this.feedDistanceLabel.textContent = `${feed.distance}px`
+    this.syncSettingsForm()
+    if (reloadFoodAnimation) this.reloadFoodAnimation()
+  }
+
+  private syncSettingsForm(): void {
+    if (this.settingsPanel === undefined) return
+    const values: Record<string, string> = {
+      'feed.offsetX': String(this.settingsValue.feed.offsetX),
+      'feed.offsetY': String(this.settingsValue.feed.offsetY),
+      'feed.distance': String(this.settingsValue.feed.distance),
+      initialScalePercent: String(this.settingsValue.initialScalePercent),
+      'theme.buttonBackground': this.settingsValue.theme.buttonBackground,
+      'theme.buttonBorder': this.settingsValue.theme.buttonBorder,
+      'theme.buttonText': this.settingsValue.theme.buttonText,
+      'theme.progressFill': this.settingsValue.theme.progressFill,
+    }
+    for (const input of this.settingsPanel.querySelectorAll<HTMLInputElement>('input[data-setting]')) {
+      const value = values[input.dataset.setting ?? '']
+      if (value !== undefined && input.value !== value) input.value = value
+    }
+  }
+
+  private reloadFoodAnimation(): void {
+    const bowl = this.queue?.querySelector<HTMLElement>('.bowl.eating')
+    if (bowl === null || bowl === undefined) return
+    bowl.style.animation = 'none'
+    void bowl.offsetWidth
+    bowl.style.removeProperty('animation')
+    bowl.dataset.animationReloaded = 'true'
+  }
+
+  private dispatchSettingsChange(): void {
+    this.dispatchEvent(new CustomEvent('pet-settings-change', {
+      detail: this.settings,
+      bubbles: true,
+      composed: true,
+    }))
   }
 
   private applyScale(value = Number(this.getAttribute('scale') ?? 1)): void {
     this.scaleValue = Math.min(2, Math.max(.6, Number.isFinite(value) ? value : 1))
     this.style.setProperty('--pet-scale', String(this.scaleValue))
-    const width = Math.round(440 * this.scaleValue)
-    const height = Math.round(258 * this.scaleValue)
+    const width = Math.round(PET_WIDTH * this.scaleValue)
+    const height = Math.round(PET_HEIGHT * this.scaleValue)
     this.style.width = `${width}px`
     this.style.height = `${height}px`
     this.dispatchEvent(new CustomEvent('pet-resize', { detail: { scale: this.scaleValue, width, height }, bubbles: true, composed: true }))
@@ -153,7 +323,7 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
     if (this.resizeStart === undefined) return
     const deltaX = event.clientX - this.resizeStart.x
     const deltaY = event.clientY - this.resizeStart.y
-    const delta = (deltaX * 440 + deltaY * 258) / (440 * 440 + 258 * 258)
+    const delta = (deltaX * PET_WIDTH + deltaY * PET_HEIGHT) / (PET_WIDTH * PET_WIDTH + PET_HEIGHT * PET_HEIGHT)
     this.setScale(this.resizeStart.scale + delta)
   }
 
@@ -161,6 +331,8 @@ export class DeepseekTokenPetElement extends HTMLElementBase {
     if (this.resizeStart === undefined) return
     this.resizeStart = undefined
     if (this.resizeHandle?.hasPointerCapture?.(event.pointerId)) this.resizeHandle.releasePointerCapture(event.pointerId)
+    const initialScalePercent = Math.round(this.scaleValue * 100)
+    if (initialScalePercent !== this.settingsValue.initialScalePercent) this.updateSettings({ initialScalePercent })
   }
 
   private applyAssets(): void {

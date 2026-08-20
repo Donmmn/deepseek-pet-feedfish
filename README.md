@@ -20,7 +20,7 @@
 DeepSeek Token Pet 0.2.6.exe
 ```
 
-首次启动后，桌宠会同时在本机启动 `http://127.0.0.1:47832`。右下角按钮可以拖动缩放；“喂饭”按钮只预览一次动画，不增加 token 或食物数量。
+首次启动后，桌宠会同时在本机启动 `http://127.0.0.1:47832`。进度条左侧的齿轮按钮可以打开设置，右下角按钮可以拖动缩放；“喂饭”按钮只预览一次动画，不增加 token 或食物数量。桌面版不显示任务栏图标，只驻留在系统托盘：左键单击托盘图标可显示或隐藏桌宠，右键菜单可退出软件。
 
 Git 仓库不存放大型 EXE；从源码运行需要 Node.js 20+ 和 pnpm：
 
@@ -48,6 +48,16 @@ pnpm desktop
 ```text
 %USERPROFILE%/.deepseek-token-pet-state.json
 ```
+
+## 桌宠设置
+
+点击进度条左侧的齿轮可以实时调整：
+
+- 投喂消失点的 X/Y 偏移，以及食物直线飞行距离；设置面板打开时，红色十字会标出食物消失位置，虚线会标出完整飞行距离；
+- 启动时的初始尺寸，范围为 `60%–200%`；
+- 按钮背景色、边框色、字体色和进度条填充色。
+
+修改会立即生效并保存到浏览器本地存储 `deepseek-token-pet/widget-settings@1`。桌面版使用固定的本地地址和 Electron 用户数据目录，因此重启后仍会保留。点击“恢复默认”会恢复当前验证过的默认值：消失点偏移 `(0, 0)`、飞行距离 `68px`、初始尺寸 `100%` 及默认蓝色主题。
 
 ## 导入食物素材
 
@@ -202,6 +212,19 @@ const pet = document.querySelector('deepseek-token-pet')
 pet.addTokens(1_000_000, 'embedded-client')
 pet.feedOnce()       // 只播放动画，不增加计数
 pet.setScale(1.25)   // 允许范围 0.6–2.0
+
+pet.updateSettings({
+  feed: { offsetX: 4, offsetY: -2, distance: 72 },
+  initialScalePercent: 120,
+  theme: {
+    buttonBackground: '#16295f',
+    buttonBorder: '#79b8ff',
+    buttonText: '#ffffff',
+    progressFill: '#4387e7'
+  }
+})
+
+pet.resetSettings()  // 恢复经过验证的默认设置
 
 pet.addEventListener('pet-resize', event => {
   const { scale, width, height } = event.detail

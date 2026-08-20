@@ -1,5 +1,4 @@
-import { app, BrowserWindow, dialog, Menu, nativeImage, Tray } from 'electron'
-import { readFileSync } from 'node:fs'
+import { app, BrowserWindow, dialog, Menu, nativeImage, screen, Tray } from 'electron'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -10,6 +9,7 @@ let petWindow: BrowserWindow | undefined
 let tray: Tray | undefined
 let trayTimer: ReturnType<typeof setInterval> | undefined
 let trayUnsubscribe: (() => void) | undefined
+let quitting = false
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock()
 if (!hasSingleInstanceLock) {
@@ -41,22 +41,34 @@ async function startDesktop(): Promise<void> {
   // macOS menu bar app: hide from Dock and stay alive in the status bar.
   app.dock?.hide()
 
+  const initialWidth = 440
+  const initialHeight = 290
+  const workArea = screen.getPrimaryDisplay().workArea
+
   petWindow = new BrowserWindow({
-    width: 440,
-    height: 258,
+    x: workArea.x + workArea.width - initialWidth - 16,
+    y: workArea.y + workArea.height - initialHeight - 16,
+    width: initialWidth,
+    height: initialHeight,
     minWidth: 264,
-    minHeight: 155,
+    minHeight: 174,
     transparent: true,
     frame: false,
     alwaysOnTop: true,
+    skipTaskbar: true,
     resizable: true,
     hasShadow: false,
     show: false,
     webPreferences: { sandbox: true, contextIsolation: true },
   })
   petWindow.setAlwaysOnTop(true, 'floating')
+  petWindow.on('close', event => {
+    if (quitting) return
+    event.preventDefault()
+    petWindow?.hide()
+  })
   await petWindow.loadURL(`${petUrl}/?desktop=1`)
-  setupTray(packageRoot)
+  createTray(packageRoot)
   refreshTrayMenu()
   trayUnsubscribe = runtime?.onState(() => refreshTrayMenu())
   trayTimer = setInterval(refreshTrayMenu, 30_000)
@@ -77,6 +89,15 @@ function trayStatusLabel(): string {
   return runtime?.state().dshConnected === true ? 'DSH 插件：已连接' : 'DSH 插件：未连接'
 }
 
+function createTray(packageRoot: string): void {
+  const iconPath = join(packageRoot, 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png')
+  let icon = nativeImage.createFromPath(iconPath)
+  if (icon.isEmpty()) icon = nativeImage.createFromPath(process.execPath)
+  tray = new Tray(icon)
+  tray.setToolTip('DeepSeek Token Pet')
+  tray.on('click', toggleWindow)
+}
+
 function refreshTrayMenu(): void {
   if (tray === undefined) return
   tray.setToolTip(`DeepSeek Token Pet — ${trayStatusLabel()}`)
@@ -85,19 +106,13 @@ function refreshTrayMenu(): void {
     { type: 'separator' },
     { label: '显示/隐藏桌宠', click: toggleWindow },
     { type: 'separator' },
-    { label: '退出 DeepSeek Token Pet', click: () => app.quit() },
+    { label: '退出 DeepSeek Token Pet', click: quitFromTray },
   ]))
 }
 
-function setupTray(packageRoot: string): void {
-  const icon = nativeImage.createEmpty()
-  icon.addRepresentation({ scaleFactor: 1, buffer: readFileSync(join(packageRoot, 'assets', 'tray-icon.png')) })
-  icon.addRepresentation({ scaleFactor: 2, buffer: readFileSync(join(packageRoot, 'assets', 'tray-icon@2x.png')) })
-  icon.setTemplateImage(true)
-
-  tray = new Tray(icon)
-  tray.on('click', toggleWindow)
-  refreshTrayMenu()
+function quitFromTray(): void {
+  quitting = true
+  app.quit()
 }
 
 function showStartupError(error: unknown): void {
@@ -107,10 +122,13 @@ function showStartupError(error: unknown): void {
 }
 
 app.on('before-quit', () => {
+  quitting = true
   if (trayTimer !== undefined) clearInterval(trayTimer)
   trayUnsubscribe?.()
+  tray?.destroy()
+  tray = undefined
   void runtime?.close()
 })
 app.on('window-all-closed', () => {
-  // Keep the menu bar app alive when the pet window is closed manually.
+  // The tray owns the application lifetime.
 })

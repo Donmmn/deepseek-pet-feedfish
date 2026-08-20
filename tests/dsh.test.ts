@@ -29,7 +29,7 @@ function fakeContext(): Context {
 
 describe('DeepSeek Harness adapter', () => {
   it('replaces a streamed usage sample with the finalized assistant sample', async () => {
-    runtime = await createPetServer({ port: 0, packageRoot: process.cwd() })
+    runtime = await createPetServer({ port: 0, packageRoot: process.cwd(), discoveryFile })
     const ctx = fakeContext() as any
     apply(ctx, { endpoint: `${runtime.url}/v1/events` })
     const listener = ctx.listener as ((session: unknown, event: unknown) => void) | undefined
